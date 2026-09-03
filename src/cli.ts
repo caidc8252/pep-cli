@@ -3,6 +3,7 @@ import { createAuthService } from "./auth-service.js";
 import {
   DEFAULT_CLIENT_ID,
   DEFAULT_REDIRECT_URI,
+  configuredIssuer,
   configPath,
   fileConfigStore,
 } from "./config.js";
@@ -21,7 +22,7 @@ Usage:
   pep auth token
   pep auth logout
 
-The first login requires --issuer. The non-secret issuer and client ID are then saved.
+The issuer is built into this executable. Use --issuer only to override it temporarily.
 Use \`pep auth token\` when another agent needs a fresh docs:read bearer token.`;
 }
 
@@ -37,11 +38,9 @@ function option(args: string[], name: string): string | undefined {
 async function loginConfig(args: string[]): Promise<CliConfig> {
   const store = fileConfigStore();
   const saved = await store.read();
-  const issuer = option(args, "--issuer") ?? saved?.issuer;
+  const issuer = configuredIssuer(option(args, "--issuer"));
   const clientId = option(args, "--client-id") ?? saved?.clientId ?? DEFAULT_CLIENT_ID;
   if (args.length > 0) throw new Error(`Unknown option: ${args[0]}`);
-  if (!issuer)
-    throw new Error("Missing PEP issuer. Run `pep auth login --issuer https://pep.example.com`.");
   return { version: 1, issuer, clientId, redirectUri: DEFAULT_REDIRECT_URI };
 }
 

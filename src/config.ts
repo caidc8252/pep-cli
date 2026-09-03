@@ -7,6 +7,27 @@ export const DEFAULT_CLIENT_ID = "pep-cli";
 export const DEFAULT_REDIRECT_URI = "http://localhost:53682/callback";
 export const DEFAULT_SCOPES = ["openid", "profile", "email", "docs:read"] as const;
 
+export type BuildEnvironment = "development" | "production";
+
+declare const __PEP_BUILD_ENVIRONMENT__: BuildEnvironment | undefined;
+
+export function issuerForEnvironment(environment: BuildEnvironment): string {
+  return environment === "production"
+    ? "https://pep.newlandnpt.us"
+    : "https://pep-webapp-dev.onrender.com";
+}
+
+const BUILD_ENVIRONMENT: BuildEnvironment =
+  typeof __PEP_BUILD_ENVIRONMENT__ === "undefined"
+    ? "development"
+    : __PEP_BUILD_ENVIRONMENT__;
+
+export const DEFAULT_ISSUER = issuerForEnvironment(BUILD_ENVIRONMENT);
+
+export function configuredIssuer(explicitIssuer: string | undefined): string {
+  return explicitIssuer ?? DEFAULT_ISSUER;
+}
+
 function configDirectory(): string {
   if (process.platform === "win32") return join(homedir(), "AppData", "Roaming", "PEP");
   return join(homedir(), ".config", "pep");

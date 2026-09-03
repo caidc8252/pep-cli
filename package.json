@@ -12,7 +12,12 @@
   },
   "scripts": {
     "build": "node scripts/build-js.mjs",
-    "build:exe": "node scripts/build-exe.mjs"
+    "build:exe": "node scripts/build-exe.mjs production",
+    "build:exe:dev": "node scripts/build-exe.mjs development",
+    "build:exe:prod": "node scripts/build-exe.mjs production",
+    "build:installer": "node scripts/build-installer.mjs production",
+    "build:installer:dev": "node scripts/build-installer.mjs development",
+    "build:installer:prod": "node scripts/build-installer.mjs production"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

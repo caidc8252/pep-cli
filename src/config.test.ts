@@ -1,5 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { normalizeIssuer } from "./config.js";
+import { configuredIssuer, issuerForEnvironment, normalizeIssuer } from "./config.js";
+
+describe("configuredIssuer", () => {
+  it("uses the issuer built into the executable", () => {
+    expect(configuredIssuer(undefined)).toBe("https://pep-webapp-dev.onrender.com");
+  });
+
+  it("allows --issuer to override the built-in issuer", () => {
+    expect(configuredIssuer("https://explicit.example.com")).toBe(
+      "https://explicit.example.com",
+    );
+  });
+});
+
+describe("issuerForEnvironment", () => {
+  it("maps build environments to their fixed issuers", () => {
+    expect(issuerForEnvironment("development")).toBe(
+      "https://pep-webapp-dev.onrender.com",
+    );
+    expect(issuerForEnvironment("production")).toBe("https://pep.newlandnpt.us");
+  });
+});
 
 describe("normalizeIssuer", () => {
   it("removes trailing slash, query, and fragment", () => {

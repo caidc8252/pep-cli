@@ -5,17 +5,21 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 if (process.platform !== "win32") throw new Error("build:exe must run on Windows.");
+const environment = process.argv[2] ?? "production";
+if (environment !== "development" && environment !== "production") {
+  throw new Error(`Unknown build environment: ${environment}`);
+}
 const require = createRequire(import.meta.url);
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const dist = join(packageRoot, "dist");
 mkdirSync(dist, { recursive: true });
 
-execFileSync(process.execPath, [join(packageRoot, "scripts", "build-js.mjs")], {
+execFileSync(process.execPath, [join(packageRoot, "scripts", "build-js.mjs"), environment], {
   stdio: "inherit",
 });
 const seaConfig = join(dist, "sea-config.json");
 const blob = join(dist, "pep.blob");
-const executable = join(dist, "pep.exe");
+const executable = join(dist, environment === "development" ? "pep-dev.exe" : "pep.exe");
 writeFileSync(
   seaConfig,
   JSON.stringify(
