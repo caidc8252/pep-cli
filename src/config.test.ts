@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { configuredIssuer, issuerForEnvironment, normalizeIssuer } from "./config.js";
+import {
+  configuredIssuer,
+  DEFAULT_CLIENT_ID,
+  issuerForEnvironment,
+  normalizeIssuer,
+} from "./config.js";
+
+it("uses the registered PEP CLI client ID by default", () => {
+  expect(DEFAULT_CLIENT_ID).toBe("1b916aae96f69a535d7a1a30c8f2e1dc");
+});
 
 describe("configuredIssuer", () => {
   it("uses the issuer built into the executable", () => {

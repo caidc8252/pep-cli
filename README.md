@@ -1,6 +1,6 @@
 # PEP CLI
 
-Windows command-line OAuth client for obtaining a PEP `docs:read` access token. Login uses the
+Windows command-line OAuth client for obtaining a PEP access token. Login uses the
 authorization-code flow with PKCE and a localhost callback. Access and rotating refresh tokens are
 stored in Windows Credential Manager; the non-secret issuer and client ID are stored under `%APPDATA%\\PEP`.
 
@@ -10,10 +10,10 @@ Run this once from the `pep-webapp` repository for the customer tenant (replace 
 
 ```bash
 node scripts/oauth-bootstrap.mjs --client --public \
-  --client-id pep-cli --name "PEP CLI" \
+  --client-id 1b916aae96f69a535d7a1a30c8f2e1dc --name "PEP CLI" \
   --party <party-id> --admission-user <user-id> \
   --redirect-uri http://localhost:53682/callback \
-  --scopes "openid profile email docs:read"
+  --scopes "openid profile email"
 ```
 
 If one PEP deployment serves multiple customer tenants, register a distinct client ID for each tenant

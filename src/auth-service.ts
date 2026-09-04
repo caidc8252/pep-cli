@@ -78,9 +78,6 @@ export function createAuthService(dependencies: AuthServiceDependencies) {
   async function currentAuthorization(): Promise<StoredAuthorization> {
     return withAuthorizationLock(dependencies.authorizationLockPath ?? lockPath(), async () => {
       const authorization = await requireAuthorization();
-      if (!authorization.scopes.includes("docs:read")) {
-        throw new Error("Stored authorization does not contain the required docs:read scope.");
-      }
       if (authorization.expiresAt - now() > REFRESH_EARLY_MS) return authorization;
       const discovery = await dependencies.oauth.discover(authorization.issuer);
       const refreshed = await dependencies.oauth.refresh(discovery, authorization);
@@ -123,10 +120,6 @@ export function createAuthService(dependencies: AuthServiceDependencies) {
         code,
         pkce.verifier,
       );
-      if (!authorization.scopes.includes("docs:read")) {
-        await dependencies.oauth.revoke(discovery, authorization).catch(() => undefined);
-        throw new Error("PEP did not grant the required docs:read scope.");
-      }
       const previous = await dependencies.credentialStore.read();
       await dependencies.credentialStore.write(authorization);
       await dependencies.configStore.write(normalized);

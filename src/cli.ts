@@ -23,7 +23,7 @@ Usage:
   pep auth logout
 
 The issuer is built into this executable. Use --issuer only to override it temporarily.
-Use \`pep auth token\` when another agent needs a fresh docs:read bearer token.`;
+Use \`pep auth token\` when another agent needs a fresh bearer token.`;
 }
 
 function option(args: string[], name: string): string | undefined {

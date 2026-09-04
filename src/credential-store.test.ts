@@ -16,7 +16,7 @@ describe("Windows Credential Manager", () => {
         refreshToken: "refresh-token",
         tokenType: "Bearer",
         expiresAt: 1_800_000_000_000,
-        scopes: ["openid", "docs:read"],
+        scopes: ["openid", "profile"],
       };
       try {
         await store.write(authorization);

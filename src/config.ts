@@ -3,9 +3,9 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { CliConfig, ConfigStore } from "./types.js";
 
-export const DEFAULT_CLIENT_ID = "pep-cli";
+export const DEFAULT_CLIENT_ID = "1b916aae96f69a535d7a1a30c8f2e1dc";
 export const DEFAULT_REDIRECT_URI = "http://localhost:53682/callback";
-export const DEFAULT_SCOPES = ["openid", "profile", "email", "docs:read"] as const;
+export const DEFAULT_SCOPES = ["openid", "profile", "email"] as const;
 
 export type BuildEnvironment = "development" | "production";
 

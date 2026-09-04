@@ -59,7 +59,7 @@ describe("OAuth protocol client", () => {
         config: CONFIG,
         state: "state-value",
         challenge: "challenge-value",
-        scopes: ["openid", "docs:read"],
+        scopes: ["openid", "profile"],
       }),
     );
     expect(url.origin + url.pathname).toBe(DISCOVERY.authorizationEndpoint);
@@ -67,7 +67,7 @@ describe("OAuth protocol client", () => {
       response_type: "code",
       client_id: "pep-cli",
       redirect_uri: CONFIG.redirectUri,
-      scope: "openid docs:read",
+      scope: "openid profile",
       state: "state-value",
       code_challenge: "challenge-value",
       code_challenge_method: "S256",
@@ -103,7 +103,7 @@ describe("OAuth protocol client", () => {
         refresh_token: "refresh",
         token_type: "Bearer",
         expires_in: 3600,
-        scope: "openid docs:read",
+        scope: "openid profile",
       });
     });
     const fetcher = fetchMock as unknown as typeof fetch;
@@ -119,7 +119,7 @@ describe("OAuth protocol client", () => {
       clientId: "pep-cli",
       accessToken: "access",
       refreshToken: "refresh",
-      scopes: ["openid", "docs:read"],
+      scopes: ["openid", "profile"],
     });
     expect(result.expiresAt).toBeGreaterThanOrEqual(before + 3_600_000);
     const request = fetchMock.mock.calls[0]![1]!;

@@ -35,7 +35,7 @@ function authorization(expiresAt: number, suffix = "old"): StoredAuthorization {
     refreshToken: `refresh-${suffix}`,
     tokenType: "Bearer",
     expiresAt,
-    scopes: ["openid", "profile", "email", "docs:read"],
+    scopes: ["openid", "profile", "email"],
   };
 }
 
@@ -77,7 +77,7 @@ describe("auth service", () => {
     lock = join(directory, "authorization.lock");
   });
 
-  it("logs in through localhost PKCE and stores only after docs:read is granted", async () => {
+  it("logs in through localhost PKCE and stores the authorization", async () => {
     let launchedUrl = "";
     const service = createAuthService({
       configStore,
@@ -94,7 +94,7 @@ describe("auth service", () => {
     });
     await expect(service.login(CONFIG)).resolves.toMatchObject({ accessToken: "access-login" });
     const parsed = new URL(launchedUrl);
-    expect(parsed.searchParams.get("scope")).toBe("openid profile email docs:read");
+    expect(parsed.searchParams.get("scope")).toBe("openid profile email");
     expect(parsed.searchParams.get("code_challenge_method")).toBe("S256");
     expect(oauth.exchangeCode).toHaveBeenCalledWith(
       DISCOVERY,
@@ -104,30 +104,6 @@ describe("auth service", () => {
     );
     expect(savedConfig).toEqual(CONFIG);
     expect(savedAuthorization?.refreshToken).toBe("refresh-login");
-  });
-
-  it("rejects and revokes a token response that omits docs:read", async () => {
-    vi.mocked(oauth.exchangeCode).mockResolvedValueOnce({
-      ...authorization(Date.now() + 3_600_000, "wrong-scope"),
-      scopes: ["openid"],
-    });
-    const service = createAuthService({
-      configStore,
-      credentialStore,
-      oauth,
-      authorizationLockPath: lock,
-      launchBrowser: vi.fn(async () => undefined),
-      receiveCode: async ({ onListening }) => {
-        await onListening();
-        return "authorization-code";
-      },
-    });
-    await expect(service.login(CONFIG)).rejects.toThrow("did not grant the required docs:read");
-    expect(oauth.revoke).toHaveBeenCalledWith(
-      DISCOVERY,
-      expect.objectContaining({ refreshToken: "refresh-wrong-scope" }),
-    );
-    expect(savedAuthorization).toBeNull();
   });
 
   it("refreshes near expiry and replaces both rotating tokens", async () => {
