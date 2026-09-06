@@ -74,6 +74,41 @@ describe("OAuth protocol client", () => {
     });
   });
 
+  // ── RFC 8707 受众 ────────────────────────────────────────────────────────
+  // 不带 `resource` 签出来的令牌没有受众，资源服务器内省时一律 `{"active":false}`，且与
+  // 「令牌不存在」不可区分 —— 从响应上看不出是少配了一个参数。所以这两条都要钉住。
+  it("carries every configured resource, appended not collapsed", () => {
+    const url = new URL(
+      authorizationUrl({
+        discovery: DISCOVERY,
+        config: { ...CONFIG, resources: ["urn:newland:pep:docs", "urn:newland:pep:search"] },
+        state: "state-value",
+        challenge: "challenge-value",
+        scopes: ["openid"],
+      }),
+    );
+    // ⚠ `getAll`，不是 `get`：一个对象字面量只留得下同名键的最后一个，那会把「发给 A 和 B」
+    // 静默截成「只发给 A」，客户端拿到一枚看起来正常、却在 B 那里用不了的令牌。
+    expect(url.searchParams.getAll("resource")).toEqual([
+      "urn:newland:pep:docs",
+      "urn:newland:pep:search",
+    ]);
+  });
+
+  it("omits resource entirely when none is configured", () => {
+    const url = new URL(
+      authorizationUrl({
+        discovery: DISCOVERY,
+        config: CONFIG,
+        state: "state-value",
+        challenge: "challenge-value",
+        scopes: ["openid"],
+      }),
+    );
+    // 缺省时不该发一个空的 `resource=` —— 空值与「没有受众」在服务端不是一回事。
+    expect(url.searchParams.has("resource")).toBe(false);
+  });
+
   it("accepts only discovery metadata for the configured issuer", async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       void input;

@@ -3,6 +3,11 @@ export type CliConfig = {
   issuer: string;
   clientId: string;
   redirectUri: string;
+  /**
+   * 这枚令牌准备拿去访问哪些资源服务器（RFC 8707 的 `resource`，可多值）。
+   * 缺省 = 旧版本写下的配置，登录时按 `DEFAULT_RESOURCES` 补。
+   */
+  resources?: string[];
 };
 
 export type StoredAuthorization = {

@@ -94,7 +94,8 @@ describe("auth service", () => {
     });
     await expect(service.login(CONFIG)).resolves.toMatchObject({ accessToken: "access-login" });
     const parsed = new URL(launchedUrl);
-    expect(parsed.searchParams.get("scope")).toBe("openid profile email");
+    // `docs:read` 在默认 scope 里：取文档正文那条路的必要条件，少了它文档平台回 403。
+    expect(parsed.searchParams.get("scope")).toBe("openid profile email docs:read");
     expect(parsed.searchParams.get("code_challenge_method")).toBe("S256");
     expect(oauth.exchangeCode).toHaveBeenCalledWith(
       DISCOVERY,

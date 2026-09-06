@@ -2,6 +2,7 @@
 import { createAuthService } from "./auth-service.js";
 import {
   DEFAULT_CLIENT_ID,
+  DEFAULT_RESOURCES,
   DEFAULT_REDIRECT_URI,
   configuredIssuer,
   configPath,
@@ -17,13 +18,29 @@ function usage(): string {
   return `PEP CLI ${VERSION}
 
 Usage:
-  pep auth login [--issuer <url>] [--client-id <id>]
+  pep auth login [--issuer <url>] [--client-id <id>] [--resource <uri> ...]
   pep auth status
   pep auth token
   pep auth logout
 
 The issuer is built into this executable. Use --issuer only to override it temporarily.
+--resource names which resource server the token is for (RFC 8707); repeat it for more than
+one. It defaults to the docs platform — a token minted without it is rejected by every
+resource server, and their answer looks exactly like "this token does not exist".
 Use \`pep auth token\` when another agent needs a fresh bearer token.`;
+}
+
+/** 可重复的选项，按出现顺序取值。`--resource` 是唯一一个 —— RFC 8707 允许一次带多个受众。 */
+function repeatedOption(args: string[], name: string): string[] {
+  const values: string[] = [];
+  for (;;) {
+    const index = args.indexOf(name);
+    if (index === -1) return values;
+    const value = args[index + 1];
+    if (!value || value.startsWith("--")) throw new Error(`${name} requires a value.`);
+    values.push(value);
+    args.splice(index, 2);
+  }
 }
 
 function option(args: string[], name: string): string | undefined {
@@ -40,8 +57,13 @@ async function loginConfig(args: string[]): Promise<CliConfig> {
   const saved = await store.read();
   const issuer = configuredIssuer(option(args, "--issuer"));
   const clientId = option(args, "--client-id") ?? saved?.clientId ?? DEFAULT_CLIENT_ID;
+  // 显式给了就用给的；否则沿用上次登录存下的；再否则用内置默认。**不会**是空数组 ——
+  // 没有受众的令牌在任何资源服务器那里都换不到东西。
+  const explicit = repeatedOption(args, "--resource");
+  const resources =
+    explicit.length > 0 ? explicit : (saved?.resources ?? [...DEFAULT_RESOURCES]);
   if (args.length > 0) throw new Error(`Unknown option: ${args[0]}`);
-  return { version: 1, issuer, clientId, redirectUri: DEFAULT_REDIRECT_URI };
+  return { version: 1, issuer, clientId, redirectUri: DEFAULT_REDIRECT_URI, resources };
 }
 
 async function main(): Promise<void> {

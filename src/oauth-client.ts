@@ -80,7 +80,7 @@ export function authorizationUrl(args: {
   scopes: readonly string[];
 }): string {
   const url = new URL(args.discovery.authorizationEndpoint);
-  url.search = new URLSearchParams({
+  const params = new URLSearchParams({
     response_type: "code",
     client_id: args.config.clientId,
     redirect_uri: args.config.redirectUri,
@@ -88,7 +88,12 @@ export function authorizationUrl(args: {
     state: args.state,
     code_challenge: args.challenge,
     code_challenge_method: "S256",
-  }).toString();
+  });
+  // ⚠ `resource` 逐个 append，不能塞进上面那个对象字面量：RFC 8707 §2 允许一次请求带**多个**
+  // 受众，而对象的同名键只能留一个 —— 那会把「这枚令牌要发给 A 和 B」静默截成「只发给 A」，
+  // 客户端拿到一枚看起来正常的令牌，却在 B 那里用不了。
+  for (const resource of args.config.resources ?? []) params.append("resource", resource);
+  url.search = params.toString();
   return url.toString();
 }
 
@@ -211,16 +216,24 @@ function parseTokens(body: WireTokens, config: CliConfig): StoredAuthorization {
   };
 }
 
+// 值可以是数组，只为 `resource` 一个字段：RFC 8707 §2.2 允许换令牌时再报一次受众，且同样
+// 可多值。`new URLSearchParams(对象)` 的同名键只留一个，所以这里自己 append。
 async function postForm(
   url: string,
-  form: Record<string, string>,
+  form: Record<string, string | readonly string[]>,
   operation: string,
   fetcher: typeof fetch,
 ) {
+  const body = new URLSearchParams();
+  for (const [key, value] of Object.entries(form)) {
+    if (typeof value === "string") body.set(key, value);
+    // 空数组即不带这个参数 —— 与「没有受众」是同一件事，不该发一个空的 `resource=`。
+    else for (const one of value) body.append(key, one);
+  }
   const response = await fetcher(url, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-    body: new URLSearchParams(form),
+    body,
     redirect: "error",
     signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
   });
@@ -244,6 +257,10 @@ export function createOAuthClient(fetcher: typeof fetch = fetch) {
           code,
           redirect_uri: config.redirectUri,
           code_verifier: verifier,
+          // 与 /authorize 报的那批一致。PEP 只允许**收窄**（§2.2），报同一批即原样批准；
+          // 不报则照授权时批准的全量落，两者在这里等价 —— 显式带上是为了让线上抓包能看出
+          // 这枚令牌的受众是谁，不必回头去翻授权请求。
+          resource: config.resources ?? [],
         },
         "Authorization code exchange",
         fetcher,
@@ -257,6 +274,9 @@ export function createOAuthClient(fetcher: typeof fetch = fetch) {
         clientId: authorization.clientId,
         redirectUri: "",
       };
+      // ⚠ 刷新**刻意不带** `resource`：PEP 默认继承旧令牌的受众，而 §2.2 只允许收窄。
+      // 带上反而有风险 —— 万一配置里的受众此后变过，这里就成了「凭空扩张」，PEP 会回
+      // `invalid_target`，把一次本该无声的续期变成登录失效。
       const body = await postForm(
         discovery.tokenEndpoint,
         {
