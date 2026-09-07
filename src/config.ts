@@ -89,7 +89,8 @@ function isCliConfig(value: unknown): value is CliConfig {
     // 可选：v0.1.0 写下的配置文件没有这个键，读它们不该报「配置损坏」。
     (candidate.resources === undefined ||
       (Array.isArray(candidate.resources) &&
-        candidate.resources.every((one) => typeof one === "string")))
+        candidate.resources.every((one) => typeof one === "string"))) &&
+    (candidate.docsUrl === undefined || typeof candidate.docsUrl === "string")
   );
 }
 
@@ -151,6 +152,17 @@ export function fileSkillsStateStore(path = skillsStatePath()): SkillsStateStore
       await rename(temporary, path);
     },
   };
+}
+
+/**
+ * 文档平台地址的规范化。
+ *
+ * 直接复用 `normalizeIssuer` 是有意的：两者的要求一字不差 —— 必须 HTTPS（本地服务才允许
+ * HTTP）、剥掉尾斜杠与查询/片段。它本质上是「一个可信的基地址」的规范化，只是先给 issuer
+ * 用上了。写第二份实现只会让两处慢慢分叉。
+ */
+export function normalizeDocsUrl(raw: string): string {
+  return normalizeIssuer(raw);
 }
 
 export function normalizeIssuer(raw: string): string {

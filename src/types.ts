@@ -8,6 +8,12 @@ export type CliConfig = {
    * 缺省 = 旧版本写下的配置，登录时按 `DEFAULT_RESOURCES` 补。
    */
   resources?: string[];
+  /**
+   * 文档平台地址（`pep docs` 用）。**不内置默认值** —— 它跟 PEP 的 issuer 没有固定配对
+   * 关系（同一个文档站可以对接任意一个 PEP 部署），编一个默认值会让人以为已经配好了。
+   * 由 `--docs-url` 给一次，之后记住。
+   */
+  docsUrl?: string;
 };
 
 export type StoredAuthorization = {

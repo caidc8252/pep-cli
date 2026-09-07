@@ -9,9 +9,11 @@ import {
   defaultSkillsDirectory,
   fileConfigStore,
   fileSkillsStateStore,
+  normalizeDocsUrl,
 } from "./config.js";
 import { systemCredentialStore } from "./credential-store.js";
 import { createOAuthClient } from "./oauth-client.js";
+import { fetchDocContent, fetchDocsIndex } from "./docs-service.js";
 import { syncSkills } from "./skills-service.js";
 import type { CliConfig } from "./types.js";
 
@@ -26,6 +28,8 @@ Usage:
   pep auth token
   pep auth logout
   pep skills sync [--dir <path>]
+  pep docs list [--docs-url <url>]
+  pep docs get <path> [--docs-url <url>]
 
 The issuer is built into this executable. Use --issuer only to override it temporarily.
 --resource names which resource server the token is for (RFC 8707); repeat it for more than
@@ -35,7 +39,12 @@ Use \`pep auth token\` when another agent needs a fresh bearer token.
 
 \`pep skills sync\` fetches the latest skills from PEP and writes them where Claude Code
 looks for them (${defaultSkillsDirectory()} unless --dir says otherwise). It only touches
-skills it wrote itself; anything you put there by hand is left alone.`;
+skills it wrote itself; anything you put there by hand is left alone.
+
+\`pep docs list\` prints the documents this account can read (path + description); feed a path
+straight to \`pep docs get\` to print that document as markdown on stdout. --docs-url is needed
+once and then remembered — there is no built-in default, because the same documentation site
+can front any PEP deployment.`;
 }
 
 /** 可重复的选项，按出现顺序取值。`--resource` 是唯一一个 —— RFC 8707 允许一次带多个受众。 */
@@ -85,7 +94,7 @@ async function main(): Promise<void> {
     return;
   }
   const group = args.shift();
-  if (group !== "auth" && group !== "skills")
+  if (group !== "auth" && group !== "skills" && group !== "docs")
     throw new Error(`Unknown command.\n\n${usage()}`);
   const command = args.shift();
   const configStore = fileConfigStore(configPath());
@@ -94,6 +103,49 @@ async function main(): Promise<void> {
     credentialStore: systemCredentialStore(),
     oauth: createOAuthClient(),
   });
+
+  if (group === "docs") {
+    if (command !== "list" && command !== "get") {
+      throw new Error(`Unknown docs command.\n\n${usage()}`);
+    }
+    const explicitDocsUrl = option(args, "--docs-url");
+    // `get` 的位置参数在选项摘掉之后才取 —— 否则 `--docs-url` 的值会被当成路径。
+    const path = command === "get" ? args.shift() : undefined;
+    if (args.length > 0) throw new Error(`Unknown option: ${args[0]}`);
+    if (command === "get" && !path) throw new Error("pep docs get needs a document path.");
+
+    const saved = await configStore.read();
+    const docsUrl = explicitDocsUrl
+      ? normalizeDocsUrl(explicitDocsUrl)
+      : (saved?.docsUrl ?? undefined);
+    if (!docsUrl) {
+      throw new Error(
+        "No documentation site configured. Pass --docs-url <url> once; it is remembered afterwards.",
+      );
+    }
+    // 显式给过就记住，下次不用再带。没有 saved 说明还没登录过 —— 那一步会先失败，不用管。
+    if (explicitDocsUrl && saved && saved.docsUrl !== docsUrl) {
+      await configStore.write({ ...saved, docsUrl });
+    }
+
+    const authorization = await auth.currentAuthorization();
+    const dependencies = { docsUrl, accessToken: authorization.accessToken };
+    if (command === "list") {
+      const entries = await fetchDocsIndex(dependencies);
+      if (entries.length === 0) {
+        // 空清单不是故障，是权限的答案 —— 说清楚，免得对接方去查网络。
+        console.error("No documents are readable with this account.");
+        return;
+      }
+      for (const entry of entries) {
+        console.log(entry.description ? `${entry.path}\t${entry.description}` : entry.path);
+      }
+      return;
+    }
+    // 正文原样写 stdout，不加任何装饰 —— 调用方多半要把它管道给别的东西。
+    process.stdout.write(await fetchDocContent(dependencies, path as string));
+    return;
+  }
 
   if (group === "skills") {
     if (command !== "sync") throw new Error(`Unknown skills command.\n\n${usage()}`);
