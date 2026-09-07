@@ -94,8 +94,12 @@ describe("auth service", () => {
     });
     await expect(service.login(CONFIG)).resolves.toMatchObject({ accessToken: "access-login" });
     const parsed = new URL(launchedUrl);
-    // `docs:read` 在默认 scope 里：取文档正文那条路的必要条件，少了它文档平台回 403。
-    expect(parsed.searchParams.get("scope")).toBe("openid profile email docs:read");
+    // 两个业务 scope 都在默认里，各自守一条链路：`docs:read` 少了文档平台回 403，
+    // `skills:read` 少了 `pep skills sync` 回 403。⚠ 两者都还要 PEP 那侧那枚客户端的
+    // `allowed_scopes` 里也有，否则授权阶段就被拒 —— 这里只管「我们申请了」。
+    expect(parsed.searchParams.get("scope")).toBe(
+      "openid profile email docs:read skills:read",
+    );
     expect(parsed.searchParams.get("code_challenge_method")).toBe("S256");
     expect(oauth.exchangeCode).toHaveBeenCalledWith(
       DISCOVERY,

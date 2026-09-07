@@ -45,3 +45,25 @@ export interface ConfigStore {
   read(): Promise<CliConfig | null>;
   write(config: CliConfig): Promise<void>;
 }
+
+/**
+ * 上一次 `pep skills sync` 留下的账 —— 单独一个文件，不并进 `CliConfig`。
+ *
+ * 分开是因为登录会**整份重写** config（`auth-service.login` 里的 `configStore.write`），
+ * 同步状态并进去就会被一次重新登录抹掉，而那时本地磁盘上的 skills 还在 —— 账和事实对不上，
+ * 下一次同步会以为什么都没同步过。
+ */
+export type SkillsState = {
+  version: 1;
+  /** 上次装下的那个提交（PEP 的 `X-Skills-Commit`）。服务端摘不到时没有这个键。 */
+  commit?: string;
+  /** 上次写进磁盘的 skill 名字。**只有这些才允许被删** —— 用户自己放的 skill 不归我们管。 */
+  skills: string[];
+  /** 上次写到哪儿。换目录后旧的那批要照着它清掉。 */
+  directory: string;
+};
+
+export interface SkillsStateStore {
+  read(): Promise<SkillsState | null>;
+  write(state: SkillsState): Promise<void>;
+}

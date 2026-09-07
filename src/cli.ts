@@ -6,10 +6,13 @@ import {
   DEFAULT_REDIRECT_URI,
   configuredIssuer,
   configPath,
+  defaultSkillsDirectory,
   fileConfigStore,
+  fileSkillsStateStore,
 } from "./config.js";
 import { systemCredentialStore } from "./credential-store.js";
 import { createOAuthClient } from "./oauth-client.js";
+import { syncSkills } from "./skills-service.js";
 import type { CliConfig } from "./types.js";
 
 const VERSION = "0.1.0";
@@ -22,12 +25,17 @@ Usage:
   pep auth status
   pep auth token
   pep auth logout
+  pep skills sync [--dir <path>]
 
 The issuer is built into this executable. Use --issuer only to override it temporarily.
 --resource names which resource server the token is for (RFC 8707); repeat it for more than
 one. It defaults to the docs platform — a token minted without it is rejected by every
 resource server, and their answer looks exactly like "this token does not exist".
-Use \`pep auth token\` when another agent needs a fresh bearer token.`;
+Use \`pep auth token\` when another agent needs a fresh bearer token.
+
+\`pep skills sync\` fetches the latest skills from PEP and writes them where Claude Code
+looks for them (${defaultSkillsDirectory()} unless --dir says otherwise). It only touches
+skills it wrote itself; anything you put there by hand is left alone.`;
 }
 
 /** 可重复的选项，按出现顺序取值。`--resource` 是唯一一个 —— RFC 8707 允许一次带多个受众。 */
@@ -76,7 +84,9 @@ async function main(): Promise<void> {
     console.log(VERSION);
     return;
   }
-  if (args.shift() !== "auth") throw new Error(`Unknown command.\n\n${usage()}`);
+  const group = args.shift();
+  if (group !== "auth" && group !== "skills")
+    throw new Error(`Unknown command.\n\n${usage()}`);
   const command = args.shift();
   const configStore = fileConfigStore(configPath());
   const auth = createAuthService({
@@ -84,6 +94,32 @@ async function main(): Promise<void> {
     credentialStore: systemCredentialStore(),
     oauth: createOAuthClient(),
   });
+
+  if (group === "skills") {
+    if (command !== "sync") throw new Error(`Unknown skills command.\n\n${usage()}`);
+    const directory = option(args, "--dir") ?? defaultSkillsDirectory();
+    if (args.length > 0) throw new Error(`Unknown option: ${args[0]}`);
+    // currentAuthorization 会在令牌快过期时先刷新 —— 同步是一次可能不短的下载，拿一枚
+    // 马上就到期的令牌出门没有意义。
+    const authorization = await auth.currentAuthorization();
+    const result = await syncSkills({
+      issuer: authorization.issuer,
+      accessToken: authorization.accessToken,
+      directory,
+      stateStore: fileSkillsStateStore(),
+    });
+    if (result.status === "unchanged") {
+      console.log(`Already at ${result.commit}. Nothing to do.`);
+      return;
+    }
+    console.log(
+      `Wrote ${result.fileCount} file(s) across ${result.skills.length} skill(s) to ${result.directory}`,
+    );
+    if (result.commit) console.log(`Commit: ${result.commit}`);
+    if (result.removed.length > 0)
+      console.log(`Removed (gone upstream): ${result.removed.join(" ")}`);
+    return;
+  }
 
   if (command === "login") {
     const config = await loginConfig(args);

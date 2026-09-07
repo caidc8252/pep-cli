@@ -1,14 +1,18 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { CliConfig, ConfigStore } from "./types.js";
+import type { CliConfig, ConfigStore, SkillsState, SkillsStateStore } from "./types.js";
 
 export const DEFAULT_CLIENT_ID = "1b916aae96f69a535d7a1a30c8f2e1dc";
 export const DEFAULT_REDIRECT_URI = "http://localhost:53682/callback";
 // `docs:read` 是取文档正文那条路的必要条件：文档平台先按它判「这个客户端可不可以问文档」，
 // 没有就回 403 insufficient_scope。⚠ 它只是**客户端级**授权，不代表这个人能读某一篇 ——
 // 逐篇权限由文档平台按内省回的身份自己判。
-export const DEFAULT_SCOPES = ["openid", "profile", "email", "docs:read"] as const;
+// `skills:read` 是 `pep skills sync` 的必要条件：PEP 先按它判「这个客户端可不可以取 skills」，
+// 没有就回 403 insufficient_scope。⚠ 光改这里**不够** —— scope 由 PEP 那侧
+// `oauth_client.allowed_scopes` 决定，那枚客户端的登记里也得有它，否则授权阶段就被拒。
+// 而且加了 scope 之后，**存量令牌不会自动获得它**：已经登录的人得再 `pep auth login` 一次。
+export const DEFAULT_SCOPES = ["openid", "profile", "email", "docs:read", "skills:read"] as const;
 
 /**
  * 默认申请的受众（RFC 8707 的 `resource`）—— 这枚令牌准备拿去访问谁。
@@ -56,6 +60,24 @@ export function lockPath(): string {
   return join(configDirectory(), "credentials.lock");
 }
 
+export function skillsStatePath(): string {
+  return join(configDirectory(), "skills.json");
+}
+
+/**
+ * `pep skills sync` 的默认落点。
+ *
+ * **个人级而不是项目级**：本仓这类项目把自己的 `.claude/skills/` 提交进版本库，往那儿写会和
+ * 项目自己管着的 skill 撞在同一个目录里 —— 同步下来的算不算改动、要不要 gitignore，每个项目
+ * 都得单独回答一遍。写个人级没有这个问题，一次同步这台机器上所有项目都看得见。
+ *
+ * ⚠ 路径在三个平台上是同一个 —— `~/.claude` 是 Claude Code 自己的约定，不随平台变；
+ * 本 CLI 自己的配置目录才按平台分叉（见 `configDirectory`）。
+ */
+export function defaultSkillsDirectory(): string {
+  return join(homedir(), ".claude", "skills");
+}
+
 function isCliConfig(value: unknown): value is CliConfig {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Record<string, unknown>;
@@ -87,6 +109,41 @@ export function fileConfigStore(path = configPath()): ConfigStore {
       await mkdir(dirname(path), { recursive: true });
       const temporary = `${path}.${process.pid}.tmp`;
       await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+      await rename(temporary, path);
+    },
+  };
+}
+
+function isSkillsState(value: unknown): value is SkillsState {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    candidate.version === 1 &&
+    typeof candidate.directory === "string" &&
+    Array.isArray(candidate.skills) &&
+    candidate.skills.every((one) => typeof one === "string") &&
+    (candidate.commit === undefined || typeof candidate.commit === "string")
+  );
+}
+
+export function fileSkillsStateStore(path = skillsStatePath()): SkillsStateStore {
+  return {
+    async read() {
+      try {
+        const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
+        // 账坏了不该让同步停摆 —— 当成「没同步过」重来一遍即可，代价只是多写一次盘。
+        // 这跟 config 不同：那个坏了就登不上，必须让人看见。
+        return isSkillsState(parsed) ? parsed : null;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        if (error instanceof SyntaxError) return null;
+        throw error;
+      }
+    },
+    async write(state) {
+      await mkdir(dirname(path), { recursive: true });
+      const temporary = `${path}.${process.pid}.tmp`;
+      await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
       await rename(temporary, path);
     },
   };
