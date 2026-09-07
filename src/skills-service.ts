@@ -61,7 +61,9 @@ export type SkillsSyncDependencies = {
 function describeFailure(status: number): string {
   if (status === 401) return "PEP rejected the access token. Run `pep auth login` again.";
   if (status === 403) {
-    return "This client is not allowed to read skills — it needs the `skills:read` scope. Run `pep auth login` again after PEP grants it.";
+    // 两种成因，说全 —— 这个 CLI 默认**不申请** `skills:read`（理由见 config.ts），
+    // 所以最常见的一种是「令牌里压根没有它」，而不是「PEP 不给」。
+    return "This access token carries no `skills:read` scope. Add it to DEFAULT_SCOPES (and to this client's allowed_scopes in PEP), then run `pep auth login` again.";
   }
   if (status === 503) {
     return "PEP could not reach the skills repository. Retry shortly, or ask an operator whether this deployment serves skills.";

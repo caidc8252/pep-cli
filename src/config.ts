@@ -8,11 +8,18 @@ export const DEFAULT_REDIRECT_URI = "http://localhost:53682/callback";
 // `docs:read` 是取文档正文那条路的必要条件：文档平台先按它判「这个客户端可不可以问文档」，
 // 没有就回 403 insufficient_scope。⚠ 它只是**客户端级**授权，不代表这个人能读某一篇 ——
 // 逐篇权限由文档平台按内省回的身份自己判。
-// `skills:read` 是 `pep skills sync` 的必要条件：PEP 先按它判「这个客户端可不可以取 skills」，
-// 没有就回 403 insufficient_scope。⚠ 光改这里**不够** —— scope 由 PEP 那侧
-// `oauth_client.allowed_scopes` 决定，那枚客户端的登记里也得有它，否则授权阶段就被拒。
-// 而且加了 scope 之后，**存量令牌不会自动获得它**：已经登录的人得再 `pep auth login` 一次。
-export const DEFAULT_SCOPES = ["openid", "profile", "email", "docs:read", "skills:read"] as const;
+// `docs:read` 是取文档正文那条路的必要条件：文档平台先按它判「这个客户端可不可以问文档」，
+// 没有就回 403 insufficient_scope。
+//
+// ⚠ **`skills:read` 故意不在这里**（`pep skills sync` 需要它）。默认清单里放一个客户端
+// 未获准的 scope，代价不是「那个功能用不了」，而是**整个登录失败**：PEP 的 `/authorize`
+// 对超出 `allowed_scopes` 的请求回 `invalid_scope` 并直接重定向回调，浏览器都不会打开。
+// 于是一个只想读文档的人，会因为一个他根本用不到的能力而登不进去 —— 而错误来自服务端，
+// 命令行上看不出是默认清单在捣鬼。真事，栽过一次。
+//
+// 要用 skills 的话：先在 PEP 那侧把 `skills:read` 加进该客户端的 `allowed_scopes`，
+// 再把它加回这个数组。⚠ 存量令牌不会自动获得新 scope，加完得重新 `pep auth login`。
+export const DEFAULT_SCOPES = ["openid", "profile", "email", "docs:read"] as const;
 
 /**
  * 默认申请的受众（RFC 8707 的 `resource`）—— 这枚令牌准备拿去访问谁。
