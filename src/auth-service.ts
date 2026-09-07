@@ -143,6 +143,15 @@ export function createAuthService(dependencies: AuthServiceDependencies) {
     async logout(): Promise<{ wasLoggedIn: boolean; revocationError?: Error }> {
       return withAuthorizationLock(dependencies.authorizationLockPath ?? lockPath(), async () => {
         const authorization = await dependencies.credentialStore.read();
+        // ⚠ **配置必须跟凭据一起清。** 它记着上次登录用的 `clientId` 与 `resources`，而那些值
+        // 是下一次 `login` 的默认（见 `cli.ts` 的 `loginConfig`）。一次一次性实验留下的值会
+        // 静默跟着你换到另一个环境 —— 比如 `--resource urn:…:probe` 只在某一个环境登记过，
+        // 换环境后 `/authorize` 直接回 `invalid_target`，而那个错来自服务端，命令行上完全看
+        // 不出是本地记着的东西在捣鬼，表现只是「登录莫名其妙失败了」。真事，排查过一轮。
+        //
+        // 放在早返回**之前**：本来就没登录时，「退出」也该把本地状态归零 —— 那正是操作员敲这
+        // 个命令想要的，而残留一份配置只会让下一次登录继续带着旧参数。
+        await dependencies.configStore.delete();
         if (!authorization) return { wasLoggedIn: false };
         let revocationError: Error | undefined;
         try {

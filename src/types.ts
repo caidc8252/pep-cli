@@ -44,6 +44,8 @@ export interface CredentialStore {
 export interface ConfigStore {
   read(): Promise<CliConfig | null>;
   write(config: CliConfig): Promise<void>;
+  /** 退出登录时连它一起清 —— 理由见 `auth-service.ts` 的 `logout`。 */
+  delete(): Promise<void>;
 }
 
 /**

@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { CliConfig, ConfigStore, SkillsState, SkillsStateStore } from "./types.js";
@@ -110,6 +110,10 @@ export function fileConfigStore(path = configPath()): ConfigStore {
       const temporary = `${path}.${process.pid}.tmp`;
       await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
       await rename(temporary, path);
+    },
+    async delete() {
+      // 本来就没有 = 已经是想要的状态，不是错误。
+      await rm(path, { force: true });
     },
   };
 }

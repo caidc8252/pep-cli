@@ -64,6 +64,9 @@ describe("auth service", () => {
       write: vi.fn(async (value) => {
         savedConfig = value;
       }),
+      delete: vi.fn(async () => {
+        savedConfig = null;
+      }),
     };
     oauth = {
       discover: vi.fn(async () => DISCOVERY),
@@ -157,5 +160,52 @@ describe("auth service", () => {
       revocationError: expect.objectContaining({ message: "offline" }),
     });
     expect(savedAuthorization).toBeNull();
+  });
+
+  // ⚠ 这两条钉的是一次真实的踩坑：`--resource urn:…:probe` 只在某一个环境登记过，它被存进
+  // config 后跟着换到了另一个环境，下一次登录被 `/authorize` 回 `invalid_target` 拒掉 ——
+  // 而那个错来自服务端，命令行上看不出是本地记着的参数在捣鬼。
+  it("logout 清掉记住的 clientId / resources，下一次登录才是干净的", async () => {
+    savedAuthorization = authorization(Date.now() + 120_000);
+    savedConfig = {
+      version: 1,
+      issuer: "https://pep.example.com",
+      clientId: "one-off-client",
+      redirectUri: "http://localhost:53682/callback",
+      resources: ["urn:newland:pep:docs", "urn:newland:pep:probe"],
+    };
+    const service = createAuthService({
+      configStore,
+      credentialStore,
+      oauth,
+      authorizationLockPath: lock,
+    });
+
+    await service.logout();
+
+    expect(savedConfig).toBeNull();
+    expect(configStore.delete).toHaveBeenCalled();
+  });
+
+  it("本来就没登录时也清 —— 「退出」就该把本地状态归零", async () => {
+    savedAuthorization = null;
+    savedConfig = {
+      version: 1,
+      issuer: "https://pep.example.com",
+      clientId: "one-off-client",
+      redirectUri: "http://localhost:53682/callback",
+      resources: ["urn:newland:pep:probe"],
+    };
+    const service = createAuthService({
+      configStore,
+      credentialStore,
+      oauth,
+      authorizationLockPath: lock,
+    });
+
+    const result = await service.logout();
+
+    expect(result).toEqual({ wasLoggedIn: false });
+    expect(savedConfig).toBeNull();
   });
 });
