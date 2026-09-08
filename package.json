@@ -5,7 +5,8 @@
   "license": "UNLICENSED",
   "type": "module",
   "os": [
-    "win32"
+    "win32",
+    "darwin"
   ],
   "engines": {
     "node": ">=24.0.0"

@@ -1,8 +1,15 @@
 # PEP CLI
 
-Windows command-line OAuth client for obtaining a PEP access token. Login uses the
-authorization-code flow with PKCE and a localhost callback. Access and rotating refresh tokens are
-stored in Windows Credential Manager; the non-secret issuer and client ID are stored under `%APPDATA%\\PEP`.
+Command-line OAuth client for obtaining a PEP access token, reading PEP documentation, and
+syncing agent skills. Login uses the authorization-code flow with PKCE and a localhost callback.
+
+Tokens live in the OS keychain — **Windows Credential Manager** or the **macOS login keychain**
+(via the built-in `security` tool). Linux is not implemented yet: `systemCredentialStore()` throws,
+and `package.json` declares `os: ["win32", "darwin"]` so npm refuses to install elsewhere rather
+than letting the install succeed and the first `auth login` fail.
+
+The non-secret issuer, client ID, resources and documentation URL are stored in a plain config file
+(`%APPDATA%\\PEP` on Windows, `~/.config/pep` elsewhere). `auth logout` clears both.
 
 ## Register the public client
 
@@ -30,11 +37,11 @@ pep auth logout
 
 The issuer is fixed at build time:
 
-| build | issuer |
-| --- | --- |
-| `development` | `https://pep-webapp-dev.onrender.com` |
-| `view` | `https://pep-webapp-view.onrender.com` |
-| `production` | `https://pep.newlandnpt.us` |
+| build         | issuer                                 |
+| ------------- | -------------------------------------- |
+| `development` | `https://pep-webapp-dev.onrender.com`  |
+| `view`        | `https://pep-webapp-view.onrender.com` |
+| `production`  | `https://pep.newlandnpt.us`            |
 
 `--issuer` remains available only as a temporary override — it is **not** remembered, so every
 `auth login` needs it again. That is why the built-in default decides where most users land.
