@@ -3,7 +3,7 @@ import { build } from "esbuild";
 import { fileURLToPath } from "node:url";
 
 const environment = process.argv[2] ?? "development";
-if (environment !== "development" && environment !== "production") {
+if (environment !== "development" && environment !== "view" && environment !== "production") {
   throw new Error(`Unknown build environment: ${environment}`);
 }
 

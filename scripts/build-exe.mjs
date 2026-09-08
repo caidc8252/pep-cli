@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 if (process.platform !== "win32") throw new Error("build:exe must run on Windows.");
 const environment = process.argv[2] ?? "production";
-if (environment !== "development" && environment !== "production") {
+if (environment !== "development" && environment !== "view" && environment !== "production") {
   throw new Error(`Unknown build environment: ${environment}`);
 }
 const require = createRequire(import.meta.url);
@@ -19,7 +19,8 @@ execFileSync(process.execPath, [join(packageRoot, "scripts", "build-js.mjs"), en
 });
 const seaConfig = join(dist, "sea-config.json");
 const blob = join(dist, "pep.blob");
-const executable = join(dist, environment === "development" ? "pep-dev.exe" : "pep.exe");
+const EXE_BASENAME = { development: "pep-dev", view: "pep-view", production: "pep" };
+const executable = join(dist, `${EXE_BASENAME[environment]}.exe`);
 writeFileSync(
   seaConfig,
   JSON.stringify(

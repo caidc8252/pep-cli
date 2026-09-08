@@ -6,15 +6,16 @@ import { fileURLToPath } from "node:url";
 if (process.platform !== "win32") throw new Error("build:installer must run on Windows.");
 
 const environment = process.argv[2] ?? "production";
-if (environment !== "development" && environment !== "production") {
+if (environment !== "development" && environment !== "view" && environment !== "production") {
   throw new Error(`Unknown build environment: ${environment}`);
 }
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const packageJson = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
 const versionQuad = `${packageJson.version.split("-")[0]}.0`;
-const sourceExe = environment === "development" ? "pep-dev.exe" : "pep.exe";
-const installerOutput = environment === "development" ? "pep-dev-setup.exe" : "pep-setup.exe";
+const EXE_BASENAME = { development: "pep-dev", view: "pep-view", production: "pep" };
+const sourceExe = `${EXE_BASENAME[environment]}.exe`;
+const installerOutput = `${EXE_BASENAME[environment]}-setup.exe`;
 
 execFileSync(process.execPath, [join(packageRoot, "scripts", "build-exe.mjs"), environment], {
   stdio: "inherit",

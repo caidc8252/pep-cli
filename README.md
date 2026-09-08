@@ -28,9 +28,22 @@ $token = pep auth token
 pep auth logout
 ```
 
-The issuer is fixed at build time. The development executable uses
-`https://pep-webapp-dev.onrender.com`; the production executable uses
-`https://pep.newlandnpt.us`. `--issuer` remains available only as a temporary override.
+The issuer is fixed at build time:
+
+| build | issuer |
+| --- | --- |
+| `development` | `https://pep-webapp-dev.onrender.com` |
+| `view` | `https://pep-webapp-view.onrender.com` |
+| `production` | `https://pep.newlandnpt.us` |
+
+`--issuer` remains available only as a temporary override — it is **not** remembered, so every
+`auth login` needs it again. That is why the built-in default decides where most users land.
+
+⚠ **The npm release is built from `view`** (see `prepublishOnly`). As of 2026-09-08
+`https://pep.newlandnpt.us/.well-known/openid-configuration` returns **404** — the production
+domain does not serve the authorization server yet, so a `production` build would fail at
+discovery on the user's very first `auth login`. Switch `prepublishOnly` back to `production`
+once that endpoint is live.
 
 `pep auth token` writes only the access token to stdout, so agents can use it without parsing status
 text. Refresh occurs automatically shortly before expiry and the rotated refresh token replaces the old
@@ -39,8 +52,9 @@ credential atomically.
 ## Build the customer executable
 
 ```powershell
-pnpm build:exe:dev   # dist/pep-dev.exe
-pnpm build:exe       # dist/pep.exe (production)
+pnpm build:exe:dev    # dist/pep-dev.exe
+pnpm build:exe:view   # dist/pep-view.exe
+pnpm build:exe        # dist/pep.exe (production)
 ```
 
 The unsigned standalone executable is written to `dist/pep.exe` and does not require Node.js
@@ -52,8 +66,9 @@ code-signing certificate after injection.
 Install [NSIS 3](https://nsis.sourceforge.io/Download), then run:
 
 ```powershell
-pnpm build:installer:dev   # dist/pep-dev-setup.exe
-pnpm build:installer      # dist/pep-setup.exe (production)
+pnpm build:installer:dev    # dist/pep-dev-setup.exe
+pnpm build:installer:view   # dist/pep-view-setup.exe
+pnpm build:installer       # dist/pep-setup.exe (production)
 ```
 
 Both user-level installers install PEP CLI under `%LOCALAPPDATA%\Programs\PEP`, add that directory

@@ -31,6 +31,7 @@ describe("issuerForEnvironment", () => {
     expect(issuerForEnvironment("development")).toBe(
       "https://pep-webapp-dev.onrender.com",
     );
+    expect(issuerForEnvironment("view")).toBe("https://pep-webapp-view.onrender.com");
     expect(issuerForEnvironment("production")).toBe("https://pep.newlandnpt.us");
   });
 });

@@ -35,14 +35,27 @@ export const DEFAULT_SCOPES = ["openid", "profile", "email", "docs:read", "skill
  */
 export const DEFAULT_RESOURCES = ["urn:newland:pep:docs"] as const;
 
-export type BuildEnvironment = "development" | "production";
+export type BuildEnvironment = "development" | "view" | "production";
 
 declare const __PEP_BUILD_ENVIRONMENT__: BuildEnvironment | undefined;
 
+/**
+ * 构建环境 → issuer。**issuer 在构建期固化**，`--issuer` 只是临时覆盖（而且不会被记住，
+ * 每次 `login` 都要重新带），所以这个默认值决定了绝大多数用户实际打到哪里。
+ *
+ * ⚠ **发布到 npm 的那一版走 `view`**（见 package.json 的 `prepublishOnly`）：
+ * 2026-09-08 实测 `https://pep.newlandnpt.us/.well-known/openid-configuration` 回 **404**
+ * —— 生产域名上还没有授权服务器。用 `production` 构建并发布，用户 `pep auth login`
+ * 会在 discovery 那一步就失败，而错误看起来像「CLI 坏了」。
+ *
+ * 等生产真的起来了，把 `prepublishOnly` 改回 `production` 即可 —— 这也是为什么此处
+ * **不把 `production` 直接指向 view**：那样等生产上线时没人记得改回来，而且 `production`
+ * 这个名字会一直骗人。
+ */
 export function issuerForEnvironment(environment: BuildEnvironment): string {
-  return environment === "production"
-    ? "https://pep.newlandnpt.us"
-    : "https://pep-webapp-dev.onrender.com";
+  if (environment === "production") return "https://pep.newlandnpt.us";
+  if (environment === "view") return "https://pep-webapp-view.onrender.com";
+  return "https://pep-webapp-dev.onrender.com";
 }
 
 const BUILD_ENVIRONMENT: BuildEnvironment =
