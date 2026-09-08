@@ -3,7 +3,21 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { CliConfig, ConfigStore, SkillsState, SkillsStateStore } from "./types.js";
 
-export const DEFAULT_CLIENT_ID = "1b916aae96f69a535d7a1a30c8f2e1dc";
+/**
+ * 每个环境的 CLI 客户端。
+ *
+ * ⚠ **`client_id` 跟 issuer 一样是按环境分的，不是全局常量。** 它是登记时生成的随机十六进制
+ * 串，每个 PEP 部署各有一枚 —— 拿 dev 那枚去打 view，`/authorize` 回 **400**（客户端不存在），
+ * 而 400 不带任何解释，看起来就像 CLI 坏了。
+ *
+ * 2026-09-08 差点发出去的那版就是这样：issuer 做成了三档，`client_id` 还是写死的 dev 那枚，
+ * 于是 view 构建的默认组合是「view 的地址 + dev 的客户端」，第一条 `auth login` 必死。
+ */
+export function clientIdForEnvironment(environment: BuildEnvironment): string {
+  if (environment === "production") return "1b916aae96f69a535d7a1a30c8f2e1dc";
+  if (environment === "view") return "47fa555671db11b6ef0930e476c98353";
+  return "1b916aae96f69a535d7a1a30c8f2e1dc";
+}
 export const DEFAULT_REDIRECT_URI = "http://localhost:53682/callback";
 // `docs:read` 是取文档正文那条路的必要条件：文档平台先按它判「这个客户端可不可以问文档」，
 // 没有就回 403 insufficient_scope。⚠ 它只是**客户端级**授权，不代表这个人能读某一篇 ——
@@ -64,6 +78,7 @@ const BUILD_ENVIRONMENT: BuildEnvironment =
     : __PEP_BUILD_ENVIRONMENT__;
 
 export const DEFAULT_ISSUER = issuerForEnvironment(BUILD_ENVIRONMENT);
+export const DEFAULT_CLIENT_ID = clientIdForEnvironment(BUILD_ENVIRONMENT);
 
 export function configuredIssuer(explicitIssuer: string | undefined): string {
   return explicitIssuer ?? DEFAULT_ISSUER;

@@ -3,12 +3,47 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  type BuildEnvironment,
+  clientIdForEnvironment,
   configuredIssuer,
   DEFAULT_CLIENT_ID,
+  DEFAULT_ISSUER,
   fileConfigStore,
   issuerForEnvironment,
   normalizeIssuer,
 } from "./config.js";
+
+// ⚠ 这一组钉的是「client_id 必须跟 issuer 同环境」。2026-09-08 差点发出去一版
+// 「view 的地址 + dev 的客户端」—— `/authorize` 回 400 且不带任何解释，看着像 CLI 坏了。
+// `client_id` 是登记时生成的随机串、每个部署各一枚，所以它和 issuer 必须成对出现。
+describe("issuer 与 client_id 必须同环境", () => {
+  // 每一档写出**完整的一对**。少写一半就是这次要防的那个 bug。
+  const EXPECTED: Record<BuildEnvironment, { issuer: string; clientId: string }> = {
+    development: {
+      issuer: "https://pep-webapp-dev.onrender.com",
+      clientId: "1b916aae96f69a535d7a1a30c8f2e1dc",
+    },
+    view: {
+      issuer: "https://pep-webapp-view.onrender.com",
+      clientId: "47fa555671db11b6ef0930e476c98353",
+    },
+    production: {
+      issuer: "https://pep.newlandnpt.us",
+      clientId: "1b916aae96f69a535d7a1a30c8f2e1dc",
+    },
+  };
+
+  it.each(Object.keys(EXPECTED) as BuildEnvironment[])("%s 那一对对得上", (env) => {
+    expect(issuerForEnvironment(env)).toBe(EXPECTED[env].issuer);
+    expect(clientIdForEnvironment(env)).toBe(EXPECTED[env].clientId);
+  });
+
+  it("构建期固化出来的那一对也是同一档", () => {
+    const pair = Object.values(EXPECTED).find((one) => one.issuer === DEFAULT_ISSUER);
+    expect(pair, `DEFAULT_ISSUER=${DEFAULT_ISSUER} 不属于任何一档`).toBeDefined();
+    expect(DEFAULT_CLIENT_ID).toBe(pair?.clientId);
+  });
+});
 
 it("uses the registered PEP CLI client ID by default", () => {
   expect(DEFAULT_CLIENT_ID).toBe("1b916aae96f69a535d7a1a30c8f2e1dc");
