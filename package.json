@@ -13,7 +13,8 @@
   },
   "packageManager": "pnpm@10.18.3",
   "bin": {
-    "pep": "dist/pep.cjs"
+    "pep": "dist/pep.cjs",
+    "pep-cli": "dist/pep.cjs"
   },
   "files": [
     "dist/pep.cjs",

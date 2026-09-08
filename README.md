@@ -11,6 +11,20 @@ than letting the install succeed and the first `auth login` fail.
 The non-secret issuer, client ID, resources and documentation URL are stored in a plain config file
 (`%APPDATA%\\PEP` on Windows, `~/.config/pep` elsewhere). `auth logout` clears both.
 
+## Command name
+
+The package installs **two** names for the same executable:
+
+```
+pep        # short form, used throughout this document
+pep-cli    # alias
+```
+
+`bin` names are global and independent of the package name — any other package (or any
+non-npm tool) may also claim `pep`, and on a global install the last one wins silently.
+The alias costs nothing (one more symlink to the same file) and gives scripts a name that
+cannot be clobbered by an unrelated `pep`. Prefer `pep-cli` in anything automated.
+
 ## Register the public client
 
 Run this once from the `pep-webapp` repository for the customer tenant (replace the IDs):
