@@ -97,9 +97,11 @@ describe("auth service", () => {
     });
     await expect(service.login(CONFIG)).resolves.toMatchObject({ accessToken: "access-login" });
     const parsed = new URL(launchedUrl);
-    // ⚠ 这条断言钉的是「默认只申请这四个」。`skills:read` **刻意不在内** —— 默认清单里
-    // 放一个客户端未获准的 scope，会让整个登录被 `invalid_scope` 拒掉（理由见 config.ts）。
-    expect(parsed.searchParams.get("scope")).toBe("openid profile email docs:read");
+    // ⚠ 这条断言钉的是默认申请哪几个 scope。改动它之前先读 config.ts 那段注释：默认清单里
+    // 出现任何一个客户端未获准的 scope，会让**整个登录**被 `invalid_scope` 拒掉。
+    expect(parsed.searchParams.get("scope")).toBe(
+      "openid profile email docs:read skills:read",
+    );
     expect(parsed.searchParams.get("code_challenge_method")).toBe("S256");
     expect(oauth.exchangeCode).toHaveBeenCalledWith(
       DISCOVERY,

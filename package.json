@@ -1,8 +1,11 @@
 {
   "name": "pep-cli",
   "version": "0.1.0",
-  "private": true,
+  "description": "PEP CLI —— 凭 PEP 身份读取 Newland 开发者文档与 agent skills",
   "type": "module",
+  "os": [
+    "win32"
+  ],
   "engines": {
     "node": ">=24.0.0"
   },
@@ -10,6 +13,10 @@
   "bin": {
     "pep": "dist/pep.cjs"
   },
+  "files": [
+    "dist/pep.cjs",
+    "README.md"
+  ],
   "scripts": {
     "build": "node scripts/build-js.mjs",
     "build:exe": "node scripts/build-exe.mjs production",
@@ -17,7 +24,8 @@
     "build:exe:prod": "node scripts/build-exe.mjs production",
     "build:installer": "node scripts/build-installer.mjs production",
     "build:installer:dev": "node scripts/build-installer.mjs development",
-    "build:installer:prod": "node scripts/build-installer.mjs production"
+    "build:installer:prod": "node scripts/build-installer.mjs production",
+    "prepublishOnly": "node scripts/build-js.mjs production"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

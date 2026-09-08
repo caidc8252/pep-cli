@@ -11,15 +11,17 @@ export const DEFAULT_REDIRECT_URI = "http://localhost:53682/callback";
 // `docs:read` 是取文档正文那条路的必要条件：文档平台先按它判「这个客户端可不可以问文档」，
 // 没有就回 403 insufficient_scope。
 //
-// ⚠ **`skills:read` 故意不在这里**（`pep skills sync` 需要它）。默认清单里放一个客户端
-// 未获准的 scope，代价不是「那个功能用不了」，而是**整个登录失败**：PEP 的 `/authorize`
-// 对超出 `allowed_scopes` 的请求回 `invalid_scope` 并直接重定向回调，浏览器都不会打开。
-// 于是一个只想读文档的人，会因为一个他根本用不到的能力而登不进去 —— 而错误来自服务端，
-// 命令行上看不出是默认清单在捣鬼。真事，栽过一次。
+// `skills:read` 是 `pep skills sync` 的必要条件。
 //
-// 要用 skills 的话：先在 PEP 那侧把 `skills:read` 加进该客户端的 `allowed_scopes`，
-// 再把它加回这个数组。⚠ 存量令牌不会自动获得新 scope，加完得重新 `pep auth login`。
-export const DEFAULT_SCOPES = ["openid", "profile", "email", "docs:read"] as const;
+// ⚠ **它必须在每个环境的客户端 `allowed_scopes` 里都存在。** 默认清单里放一个客户端未获准
+// 的 scope，代价不是「那个功能用不了」，而是**整个登录失败**：PEP 的 `/authorize` 对超出
+// `allowed_scopes` 的请求回 `invalid_scope` 并直接重定向回调，浏览器都不会打开。于是一个
+// 只想读文档的人，会因为一个他根本用不到的能力而登不进去 —— 而错误来自服务端，命令行上
+// 看不出是默认清单在捣鬼。2026-09-07 栽过一次，只能退回上一个提交重新构建。
+//
+// 所以**新登记一枚客户端时，这两个业务 scope 要一起给**；给旧客户端加 scope 之后，存量
+// 令牌不会自动获得它，用户得重新 `pep auth login`。
+export const DEFAULT_SCOPES = ["openid", "profile", "email", "docs:read", "skills:read"] as const;
 
 /**
  * 默认申请的受众（RFC 8707 的 `resource`）—— 这枚令牌准备拿去访问谁。
