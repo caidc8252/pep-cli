@@ -36,15 +36,24 @@ export type SkillsSyncResult =
 export function planSkillFiles(entries: readonly TarEntry[]): SkillFile[] {
   const files: SkillFile[] = [];
   for (const entry of entries) {
-    const segments = entry.path.split("/").filter((one) => one !== "" && one !== ".");
+    const segments = entry.path
+      .split("/")
+      .filter((one) => one !== "" && one !== ".");
     if (segments.some((one) => one === "..")) {
-      throw new Error(`Refusing an archive entry that escapes its directory: ${entry.path}`);
+      throw new Error(
+        `Refusing an archive entry that escapes its directory: ${entry.path}`,
+      );
     }
     const withoutRoot = segments.slice(1);
-    const relative = withoutRoot[0] === SKILLS_SEGMENT ? withoutRoot.slice(1) : withoutRoot;
+    const relative =
+      withoutRoot[0] === SKILLS_SEGMENT ? withoutRoot.slice(1) : withoutRoot;
     // 少于两段 = 不在任何 skill 目录里（归档根下的散文件），不属于同步范围。
     if (relative.length < 2) continue;
-    files.push({ skill: relative[0], path: relative.slice(1).join("/"), data: entry.data });
+    files.push({
+      skill: relative[0],
+      path: relative.slice(1).join("/"),
+      data: entry.data,
+    });
   }
   return files;
 }
@@ -59,11 +68,20 @@ export type SkillsSyncDependencies = {
 
 /** 把 HTTP 状态翻成「你该做什么」。PEP 那侧四种上游故障已经收敛成一个 503。 */
 function describeFailure(status: number): string {
-  if (status === 401) return "PEP rejected the access token. Run `pep auth login` again.";
+  if (status === 401)
+    return "PEP rejected the access token. Run `pep auth login` again.";
   if (status === 403) {
-    // 两种成因，说全 —— 这个 CLI 默认**不申请** `skills:read`（理由见 config.ts），
-    // 所以最常见的一种是「令牌里压根没有它」，而不是「PEP 不给」。
-    return "This access token carries no `skills:read` scope. Add it to DEFAULT_SCOPES (and to this client's allowed_scopes in PEP), then run `pep auth login` again.";
+    // 这个 CLI 的 `DEFAULT_SCOPES` **含** `skills:read`，所以令牌里没有它只有一个成因：
+    // 这枚客户端在 PEP 那侧的 `allowed_scopes` 里没获准。⚠ 措辞必须指向那一侧 ——
+    // 早先这句写的是「加进 DEFAULT_SCOPES」，那是 CLI 曾经不申请它时的说法，现在会把人
+    // 指错方向（去改一个已经对了的地方）。
+    return "This access token carries no `skills:read` scope. Ask an operator to add it to this client's allowed_scopes in PEP, then run `pep auth login` again — existing tokens do not gain new scopes.";
+  }
+  if (status === 404) {
+    // ⚠ 单独一句，不能落到兜底的 `PEP answered 404.`。那句话意思没错，但它不会告诉你
+    // 「这个部署压根没有这个端点」—— 而那正是最常见的 404 成因（端点还没部署上去）。
+    // 说不清的话，使用者只会以为 CLI 坏了，然后开始重试。
+    return "This PEP deployment does not serve skills — it has no /api/skills/archive endpoint. Ask an operator whether skills are enabled here.";
   }
   if (status === 503) {
     return "PEP could not reach the skills repository. Retry shortly, or ask an operator whether this deployment serves skills.";
@@ -109,16 +127,25 @@ export async function syncSkills(
 
   // 先删后写：上游删掉的文件，本地跟着消失。范围严格限定在这次要写的这几个 skill 目录。
   for (const skill of skills) {
-    await rm(join(dependencies.directory, skill), { recursive: true, force: true });
+    await rm(join(dependencies.directory, skill), {
+      recursive: true,
+      force: true,
+    });
   }
   for (const file of files) {
-    const target = join(dependencies.directory, file.skill, ...file.path.split("/"));
+    const target = join(
+      dependencies.directory,
+      file.skill,
+      ...file.path.split("/"),
+    );
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, file.data);
   }
 
   // 上次写过、这次没有了的，移除。**只移除记在账上的** —— 用户自己放的 skill 不归我们管。
-  const removed = (previous?.skills ?? []).filter((skill) => !skills.includes(skill));
+  const removed = (previous?.skills ?? []).filter(
+    (skill) => !skills.includes(skill),
+  );
   for (const skill of removed) {
     await rm(join(previous?.directory ?? dependencies.directory, skill), {
       recursive: true,
