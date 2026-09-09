@@ -2,6 +2,7 @@
 import { createAuthService } from "./auth-service.js";
 import {
   DEFAULT_CLIENT_ID,
+  DEFAULT_DOCS_URL,
   DEFAULT_RESOURCES,
   DEFAULT_REDIRECT_URI,
   configuredIssuer,
@@ -42,9 +43,8 @@ looks for them (${defaultSkillsDirectory()} unless --dir says otherwise). It onl
 skills it wrote itself; anything you put there by hand is left alone.
 
 \`pep docs list\` prints the documents this account can read (path + description); feed a path
-straight to \`pep docs get\` to print that document as markdown on stdout. --docs-url is needed
-once and then remembered — there is no built-in default, because the same documentation site
-can front any PEP deployment.`;
+straight to \`pep docs get\` to print that document as markdown on stdout. The documentation
+site is built in (${DEFAULT_DOCS_URL}); --docs-url overrides it and is then remembered.`;
 }
 
 /** 可重复的选项，按出现顺序取值。`--resource` 是唯一一个 —— RFC 8707 允许一次带多个受众。 */
@@ -115,14 +115,10 @@ async function main(): Promise<void> {
     if (command === "get" && !path) throw new Error("pep docs get needs a document path.");
 
     const saved = await configStore.read();
+    // 显式 > 记住 > 内置，与 issuer / clientId / resources 同一口径。
     const docsUrl = explicitDocsUrl
       ? normalizeDocsUrl(explicitDocsUrl)
-      : (saved?.docsUrl ?? undefined);
-    if (!docsUrl) {
-      throw new Error(
-        "No documentation site configured. Pass --docs-url <url> once; it is remembered afterwards.",
-      );
-    }
+      : (saved?.docsUrl ?? DEFAULT_DOCS_URL);
     // 显式给过就记住，下次不用再带。没有 saved 说明还没登录过 —— 那一步会先失败，不用管。
     if (explicitDocsUrl && saved && saved.docsUrl !== docsUrl) {
       await configStore.write({ ...saved, docsUrl });

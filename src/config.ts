@@ -54,6 +54,24 @@ export const DEFAULT_SCOPES = ["openid", "profile", "email", "docs:read", "skill
  */
 export const DEFAULT_RESOURCES = ["urn:newland:pep:docs"] as const;
 
+/**
+ * 文档平台地址。**单个常量，所有构建通用** —— 与 `issuer` 不同，它不按构建环境分叉。
+ *
+ * 为什么不跟 issuer 一样做成三档（操作员 2026-09-09 裁决）：文档平台是**另一个独立部署**，
+ * 生产上的最终域名还没定（可能挂到 `pep.newlandnpt.us` 的子路径或某个子域）。做成三档就得
+ * 现在给 `production` 编一个不存在的地址，而发布的包走的正是 `production` 构建 —— 结果是
+ * 用户装完 `pep docs list` 仍然要手填。宁可三档都指向这个已经在跑的地址：**装完就能用**。
+ *
+ * ⚠ 代价说清楚：这个 Render 地址被烘进了包，文档站换域名要重发一版才能改掉默认值。
+ * 缓解手段是 `--docs-url` —— 它覆盖本值**并记住**（见 cli.ts 的 docs 分支），所以换址之后
+ * 老用户带一次参数即可，不是硬卡住。这与 issuer 的取舍刻意相反：issuer 的生产域名已经定了、
+ * 只是功能没部署，所以那边烘的是「确定不会变的值」；这边没有那个确定性，于是选「现在能用」。
+ *
+ * 2026-09-09 实测该地址活着：`/llms.txt` 回 200 `text/plain`，无 Bearer 时 **0 字节**
+ * —— 0 字节不是坏了，是 `AUTH_GUARD_ENABLED=true` 下匿名身份的角色为空集，索引因此为空。
+ */
+export const DEFAULT_DOCS_URL = "https://pep-developer-docs.onrender.com";
+
 export type BuildEnvironment = "development" | "view" | "production";
 
 declare const __PEP_BUILD_ENVIRONMENT__: BuildEnvironment | undefined;

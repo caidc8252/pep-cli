@@ -6,9 +6,11 @@ import * as configModule from "./config.js";
 import {
   configuredIssuer,
   DEFAULT_CLIENT_ID,
+  DEFAULT_DOCS_URL,
   DEFAULT_ISSUER,
   fileConfigStore,
   issuerForEnvironment,
+  normalizeDocsUrl,
   normalizeIssuer,
 } from "./config.js";
 
@@ -112,5 +114,25 @@ describe("fileConfigStore", () => {
     await store.delete();
 
     expect(await store.read()).toBeNull();
+  });
+});
+
+// 文档平台地址：单个常量、所有构建通用。钉住「它有一个可用的内置默认」——发布的包走
+// production 构建，若这里退回 undefined，用户装完 `pep docs list` 又要手填 --docs-url。
+describe("DEFAULT_DOCS_URL", () => {
+  it("是一个烘进来的绝对 https 地址", () => {
+    expect(DEFAULT_DOCS_URL).toBe("https://pep-developer-docs.onrender.com");
+    expect(new URL(DEFAULT_DOCS_URL).protocol).toBe("https:");
+  });
+
+  // 与 issuer 刻意不同：issuer 按环境三档，文档地址不分档。谁把它做成按环境分的，这里红。
+  it("没有 docsUrlForEnvironment 这种东西", () => {
+    expect("docsUrlForEnvironment" in configModule).toBe(false);
+  });
+
+  // normalizeDocsUrl 是 docs 分支对 --docs-url 的归一化入口；内置默认必须已经是归一形态，
+  // 否则「带参数」和「用默认」两条路会得到不同的 base，拼出来的路径也就不同。
+  it("本身已是归一形态", () => {
+    expect(normalizeDocsUrl(DEFAULT_DOCS_URL)).toBe(DEFAULT_DOCS_URL);
   });
 });
