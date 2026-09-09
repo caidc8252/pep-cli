@@ -11,6 +11,18 @@ than letting the install succeed and the first `auth login` fail.
 The non-secret issuer, client ID, resources and documentation URL are stored in a plain config file
 (`%APPDATA%\\PEP` on Windows, `~/.config/pep` elsewhere). `auth logout` clears both.
 
+## Install
+
+```
+npm i -g @newlandnpt/pep-cli
+```
+
+The package name is scoped, the command names are not — see below. The scope is not a style
+choice: npm's typo-squatting policy **refuses** the unscoped name `pep-cli` ("too similar to
+existing packages cp-cli, del-cli, open-cli"), and that check applies to every short
+`<prefix>-cli` name. Scoped names skip the check, so `@newlandnpt/…` is what makes this
+publishable at all.
+
 ## Command name
 
 The package installs **two** names for the same executable:
