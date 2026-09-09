@@ -72,7 +72,7 @@ function option(args: string[], name: string): string | undefined {
 async function loginConfig(args: string[]): Promise<CliConfig> {
   const store = fileConfigStore();
   const saved = await store.read();
-  const issuer = configuredIssuer(option(args, "--issuer"));
+  const issuer = configuredIssuer(option(args, "--issuer"), saved?.issuer);
   const clientId = option(args, "--client-id") ?? saved?.clientId ?? DEFAULT_CLIENT_ID;
   // 显式给了就用给的；否则沿用上次登录存下的；再否则用内置默认。**不会**是空数组 ——
   // 没有受众的令牌在任何资源服务器那里都换不到东西。

@@ -4,20 +4,25 @@ import { dirname, join } from "node:path";
 import type { CliConfig, ConfigStore, SkillsState, SkillsStateStore } from "./types.js";
 
 /**
- * 每个环境的 CLI 客户端。
+ * CLI 的 client_id。**一个名字，所有环境通用** —— 与 issuer 不同，它不按构建环境分叉。
  *
- * ⚠ **`client_id` 跟 issuer 一样是按环境分的，不是全局常量。** 它是登记时生成的随机十六进制
- * 串，每个 PEP 部署各有一枚 —— 拿 dev 那枚去打 view，`/authorize` 回 **400**（客户端不存在），
- * 而 400 不带任何解释，看起来就像 CLI 坏了。
+ * 这是 2026-09-09 的改法，替掉了「每个环境一枚平台生成的随机十六进制串」。旧办法有两个毛病：
  *
- * 2026-09-08 差点发出去的那版就是这样：issuer 做成了三档，`client_id` 还是写死的 dev 那枚，
- * 于是 view 构建的默认组合是「view 的地址 + dev 的客户端」，第一条 `auth login` 必死。
+ * ① **多了一个可配错的维度**：issuer 三档、client_id 三档，两者必须同档。2026-09-08 差点
+ *    发出去一版「view 的地址 + dev 的客户端」，`/authorize` 回 400 且不带任何解释，看着像
+ *    CLI 坏了。改成固定名字之后这个配对根本不存在 —— 没有第二个维度可配错。
+ * ② **鸡生蛋**：随机串由平台在登记时生成，于是「生产还没上线 → 登记不了客户端 → 拿不到
+ *    client_id → 烘不进 CLI → 发不了包」。而 client_id 只要求在该部署内唯一，并不要求由
+ *    平台生成（`app.oauth_client.client_id` 是 varchar(64) 唯一键，随机只是登记台的习惯）。
+ *    我们自己定一个名字，顺序就反过来：先发包，各环境照这个名字登记即可。
+ *
+ * 它**不是秘密**（每次授权都出现在浏览器地址栏里），且本客户端是 public 客户端、靠 PKCE
+ * 保护，所以取个可读的名字没有安全代价。
+ *
+ * ⚠ 代价是**每个部署都得有一枚叫这个名字的客户端**：dev / view / 生产各登记一次。
+ * 缺哪个环境，打那个环境时 `/authorize` 回 400（客户端不存在）。
  */
-export function clientIdForEnvironment(environment: BuildEnvironment): string {
-  if (environment === "production") return "1b916aae96f69a535d7a1a30c8f2e1dc";
-  if (environment === "view") return "47fa555671db11b6ef0930e476c98353";
-  return "1b916aae96f69a535d7a1a30c8f2e1dc";
-}
+export const DEFAULT_CLIENT_ID = "pep-cli";
 export const DEFAULT_REDIRECT_URI = "http://localhost:53682/callback";
 // `docs:read` 是取文档正文那条路的必要条件：文档平台先按它判「这个客户端可不可以问文档」，
 // 没有就回 403 insufficient_scope。⚠ 它只是**客户端级**授权，不代表这个人能读某一篇 ——
@@ -54,17 +59,20 @@ export type BuildEnvironment = "development" | "view" | "production";
 declare const __PEP_BUILD_ENVIRONMENT__: BuildEnvironment | undefined;
 
 /**
- * 构建环境 → issuer。**issuer 在构建期固化**，`--issuer` 只是临时覆盖（而且不会被记住，
- * 每次 `login` 都要重新带），所以这个默认值决定了绝大多数用户实际打到哪里。
+ * 构建环境 → issuer。**issuer 在构建期固化**，`--issuer` 只是覆盖（会被记住，见
+ * `configuredIssuer`），所以这个默认值决定了绝大多数用户实际打到哪里。
  *
- * ⚠ **发布到 npm 的那一版走 `view`**（见 package.json 的 `prepublishOnly`）：
- * 2026-09-08 实测 `https://pep.newlandnpt.us/.well-known/openid-configuration` 回 **404**
- * —— 生产域名上还没有授权服务器。用 `production` 构建并发布，用户 `pep auth login`
- * 会在 discovery 那一步就失败，而错误看起来像「CLI 坏了」。
+ * **发布到 npm 的那一版走 `production`**（见 package.json 的 `prepack`）—— 与 Stripe 一类
+ * 客户端同一口径：包里只内置生产地址，内部环境靠参数指过去。这样地址变更不需要重发包。
  *
- * 等生产真的起来了，把 `prepublishOnly` 改回 `production` 即可 —— 这也是为什么此处
- * **不把 `production` 直接指向 view**：那样等生产上线时没人记得改回来，而且 `production`
- * 这个名字会一直骗人。
+ * ⚠ **2026-09-09 实测生产上还没有授权服务器**：`https://pep.newlandnpt.us` 站点本身活着
+ * （307），但 `/.well-known/openid-configuration`、`/api/oauth/openid-configuration`、
+ * `/api/oauth/jwks` 全部 **404**，而 view 上同一条路径 200。`DISCOVERY` 这个 handler 不看
+ * 任何配置，所以那不是缺配置，是生产跑的构建里根本没有授权服务器模块。
+ * ⇒ 在生产补上之前，**默认的 `pep auth login` 会在 discovery 那一步失败**；演示要带
+ * `--issuer https://pep-webapp-view.onrender.com`（带一次就记住了）。
+ * 这是操作员 2026-09-09 的明确取舍：宁可现在烘对的地址、等生产补齐，也不要为了当下能跑
+ * 而烘一个将来必须重发包才能改掉的测试地址。
  */
 export function issuerForEnvironment(environment: BuildEnvironment): string {
   if (environment === "production") return "https://pep.newlandnpt.us";
@@ -78,10 +86,23 @@ const BUILD_ENVIRONMENT: BuildEnvironment =
     : __PEP_BUILD_ENVIRONMENT__;
 
 export const DEFAULT_ISSUER = issuerForEnvironment(BUILD_ENVIRONMENT);
-export const DEFAULT_CLIENT_ID = clientIdForEnvironment(BUILD_ENVIRONMENT);
 
-export function configuredIssuer(explicitIssuer: string | undefined): string {
-  return explicitIssuer ?? DEFAULT_ISSUER;
+/**
+ * 本次 `login` 打哪个 issuer：显式 `--issuer` > 上次登录记住的 > 构建期烘进去的。
+ *
+ * **中间那一档是 2026-09-09 补的**，此前 `--issuer` 每次都要重新带。补它的直接理由：包里
+ * 烘的是生产地址，而生产上授权服务器还没部署（实测 discovery 404），所以在生产补上之前，
+ * 演示要靠 `--issuer` 指到 view。若不记住，用户此后**每一条** `login` 都得重复带这个参数，
+ * 忘一次就静默打回生产、在 discovery 那步失败，而报错看起来像 CLI 坏了。
+ *
+ * 与 `clientId` / `resources` 同一口径（都是「显式 > 记住 > 内置」），此前 issuer 是三者中
+ * 唯一不记的那个 —— 那个不对称本身就是个坑。
+ */
+export function configuredIssuer(
+  explicitIssuer: string | undefined,
+  savedIssuer?: string | undefined,
+): string {
+  return explicitIssuer ?? savedIssuer ?? DEFAULT_ISSUER;
 }
 
 function configDirectory(): string {

@@ -28,7 +28,7 @@
     "build:installer": "node scripts/build-installer.mjs production",
     "build:installer:dev": "node scripts/build-installer.mjs development",
     "build:installer:prod": "node scripts/build-installer.mjs production",
-    "prepublishOnly": "node scripts/build-js.mjs view",
+    "prepack": "node scripts/build-js.mjs production",
     "build:exe:view": "node scripts/build-exe.mjs view",
     "build:installer:view": "node scripts/build-installer.mjs view"
   },

@@ -2,9 +2,8 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import * as configModule from "./config.js";
 import {
-  type BuildEnvironment,
-  clientIdForEnvironment,
   configuredIssuer,
   DEFAULT_CLIENT_ID,
   DEFAULT_ISSUER,
@@ -13,40 +12,31 @@ import {
   normalizeIssuer,
 } from "./config.js";
 
-// ⚠ 这一组钉的是「client_id 必须跟 issuer 同环境」。2026-09-08 差点发出去一版
-// 「view 的地址 + dev 的客户端」—— `/authorize` 回 400 且不带任何解释，看着像 CLI 坏了。
-// `client_id` 是登记时生成的随机串、每个部署各一枚，所以它和 issuer 必须成对出现。
-describe("issuer 与 client_id 必须同环境", () => {
-  // 每一档写出**完整的一对**。少写一半就是这次要防的那个 bug。
-  const EXPECTED: Record<BuildEnvironment, { issuer: string; clientId: string }> = {
-    development: {
-      issuer: "https://pep-webapp-dev.onrender.com",
-      clientId: "1b916aae96f69a535d7a1a30c8f2e1dc",
-    },
-    view: {
-      issuer: "https://pep-webapp-view.onrender.com",
-      clientId: "47fa555671db11b6ef0930e476c98353",
-    },
-    production: {
-      issuer: "https://pep.newlandnpt.us",
-      clientId: "1b916aae96f69a535d7a1a30c8f2e1dc",
-    },
-  };
-
-  it.each(Object.keys(EXPECTED) as BuildEnvironment[])("%s 那一对对得上", (env) => {
-    expect(issuerForEnvironment(env)).toBe(EXPECTED[env].issuer);
-    expect(clientIdForEnvironment(env)).toBe(EXPECTED[env].clientId);
+// ⚠ 这一组钉的是「client_id 不再有『环境』这个维度」。
+//
+// 2026-09-08 差点发出去一版「view 的地址 + dev 的客户端」——`/authorize` 回 400 且不带任何
+// 解释，看着像 CLI 坏了。根因是当时 client_id 是平台登记时生成的随机串、每个部署各一枚，
+// 于是它必须与 issuer 成对出现 —— 而凡是要成对的东西就能配错。2026-09-09 改成自选的固定
+// 名字后，那个维度整个没了。这里钉的就是「它真的没了」：谁再把 client_id 做成按环境分的，
+// 本组立刻红。
+describe("client_id 不随构建环境变", () => {
+  it("就是一个固定名字", () => {
+    expect(DEFAULT_CLIENT_ID).toBe("pep-cli");
   });
 
-  it("构建期固化出来的那一对也是同一档", () => {
-    const pair = Object.values(EXPECTED).find((one) => one.issuer === DEFAULT_ISSUER);
-    expect(pair, `DEFAULT_ISSUER=${DEFAULT_ISSUER} 不属于任何一档`).toBeDefined();
-    expect(DEFAULT_CLIENT_ID).toBe(pair?.clientId);
+  // 直接钉「那个函数不存在」。比断言某个返回值更贴近意图：要防的不是某个错值，
+  // 而是「按环境分」这个形状被重新引进来。
+  it("没有 clientIdForEnvironment 这种东西", () => {
+    expect("clientIdForEnvironment" in configModule).toBe(false);
   });
-});
 
-it("uses the registered PEP CLI client ID by default", () => {
-  expect(DEFAULT_CLIENT_ID).toBe("1b916aae96f69a535d7a1a30c8f2e1dc");
+  it("烘进来的 issuer 必是三档之一", () => {
+    expect([
+      "https://pep-webapp-dev.onrender.com",
+      "https://pep-webapp-view.onrender.com",
+      "https://pep.newlandnpt.us",
+    ]).toContain(DEFAULT_ISSUER);
+  });
 });
 
 describe("configuredIssuer", () => {
@@ -56,6 +46,20 @@ describe("configuredIssuer", () => {
 
   it("allows --issuer to override the built-in issuer", () => {
     expect(configuredIssuer("https://explicit.example.com")).toBe(
+      "https://explicit.example.com",
+    );
+  });
+
+  // 生产上授权服务器还没部署，演示得靠 --issuer 指到 view。不记住的话，用户此后每一条
+  // login 都要重复带；忘一次就静默打回生产、在 discovery 那步失败。
+  it("记住上次登录用过的 issuer", () => {
+    expect(configuredIssuer(undefined, "https://pep-webapp-view.onrender.com")).toBe(
+      "https://pep-webapp-view.onrender.com",
+    );
+  });
+
+  it("显式 --issuer 压过记住的", () => {
+    expect(configuredIssuer("https://explicit.example.com", "https://saved.example.com")).toBe(
       "https://explicit.example.com",
     );
   });
