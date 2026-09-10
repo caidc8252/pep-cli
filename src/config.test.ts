@@ -52,18 +52,11 @@ describe("configuredIssuer", () => {
     );
   });
 
-  // 生产上授权服务器还没部署，演示得靠 --issuer 指到 view。不记住的话，用户此后每一条
-  // login 都要重复带；忘一次就静默打回生产、在 discovery 那步失败。
-  it("记住上次登录用过的 issuer", () => {
-    expect(configuredIssuer(undefined, "https://pep-webapp-view.onrender.com")).toBe(
-      "https://pep-webapp-view.onrender.com",
-    );
-  });
-
-  it("显式 --issuer 压过记住的", () => {
-    expect(configuredIssuer("https://explicit.example.com", "https://saved.example.com")).toBe(
-      "https://explicit.example.com",
-    );
+  // ⚠ 钉住「只有两档」。2026-09-09 曾加过「上次登录记住的」中间一档，次日撤回 ——
+  // 它把 issuer 拉进了 clientId/resources 那套「继承上一次」语义，而那套当天就现了原形
+  // （存量配置里的旧 client_id 压过新包默认值，登录一律 2D002）。谁再加回来，这里红。
+  it("只有两档：显式 > 内置，没有「记住的」那一档", () => {
+    expect(configuredIssuer.length).toBe(1);
   });
 });
 

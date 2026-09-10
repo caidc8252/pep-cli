@@ -143,11 +143,14 @@ export function createAuthService(dependencies: AuthServiceDependencies) {
     async logout(): Promise<{ wasLoggedIn: boolean; revocationError?: Error }> {
       return withAuthorizationLock(dependencies.authorizationLockPath ?? lockPath(), async () => {
         const authorization = await dependencies.credentialStore.read();
-        // ⚠ **配置必须跟凭据一起清。** 它记着上次登录用的 `clientId` 与 `resources`，而那些值
-        // 是下一次 `login` 的默认（见 `cli.ts` 的 `loginConfig`）。一次一次性实验留下的值会
-        // 静默跟着你换到另一个环境 —— 比如 `--resource urn:…:probe` 只在某一个环境登记过，
-        // 换环境后 `/authorize` 直接回 `invalid_target`，而那个错来自服务端，命令行上完全看
-        // 不出是本地记着的东西在捣鬼，表现只是「登录莫名其妙失败了」。真事，排查过一轮。
+        // ⚠ **配置必须跟凭据一起清。**
+        //
+        // 2026-09-10 起 `issuer` / `clientId` / `resources` 不再被下一次 `login` 继承
+        // （`cli.ts` 的 `loginConfig` 有完整理由），所以本行不再是「防止旧参数跟着换环境」
+        // 那道防线 —— 那道防线已经移到源头了。留着它是因为另外两条：
+        //   · `docsUrl` **仍然**会被沿用，退出登录理应把它也归零；
+        //   · config.json 记着上次登录打的是哪个 issuer / 哪个 client，那是身份痕迹，
+        //     `logout` 说的就是「把本地关于这个账号的东西清掉」。
         //
         // 放在早返回**之前**：本来就没登录时，「退出」也该把本地状态归零 —— 那正是操作员敲这
         // 个命令想要的，而残留一份配置只会让下一次登录继续带着旧参数。

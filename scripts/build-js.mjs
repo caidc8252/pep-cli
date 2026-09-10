@@ -9,7 +9,7 @@ if (environment !== "development" && environment !== "view" && environment !== "
 
 await mkdir(new URL("../dist/", import.meta.url), { recursive: true });
 await build({
-  entryPoints: [fileURLToPath(new URL("../src/cli.ts", import.meta.url))],
+  entryPoints: [fileURLToPath(new URL("../src/main.ts", import.meta.url))],
   outfile: fileURLToPath(new URL("../dist/pep.cjs", import.meta.url)),
   bundle: true,
   platform: "node",

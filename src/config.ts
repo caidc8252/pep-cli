@@ -77,8 +77,8 @@ export type BuildEnvironment = "development" | "view" | "production";
 declare const __PEP_BUILD_ENVIRONMENT__: BuildEnvironment | undefined;
 
 /**
- * 构建环境 → issuer。**issuer 在构建期固化**，`--issuer` 只是覆盖（会被记住，见
- * `configuredIssuer`），所以这个默认值决定了绝大多数用户实际打到哪里。
+ * 构建环境 → issuer。**issuer 在构建期固化**，`--issuer` 只覆盖当次、不被记住，
+ * 所以这个默认值决定了绝大多数用户实际打到哪里。
  *
  * **发布到 npm 的那一版走 `production`**（见 package.json 的 `prepack`）—— 与 Stripe 一类
  * 客户端同一口径：包里只内置生产地址，内部环境靠参数指过去。这样地址变更不需要重发包。
@@ -88,7 +88,8 @@ declare const __PEP_BUILD_ENVIRONMENT__: BuildEnvironment | undefined;
  * `/api/oauth/jwks` 全部 **404**，而 view 上同一条路径 200。`DISCOVERY` 这个 handler 不看
  * 任何配置，所以那不是缺配置，是生产跑的构建里根本没有授权服务器模块。
  * ⇒ 在生产补上之前，**默认的 `pep auth login` 会在 discovery 那一步失败**；演示要带
- * `--issuer https://pep-webapp-view.onrender.com`（带一次就记住了）。
+ * `--issuer https://pep-webapp-view.onrender.com` —— **每次 login 都要带**（2026-09-10 起
+ * 不再记住，理由见 `configuredIssuer` 的沿革）。
  * 这是操作员 2026-09-09 的明确取舍：宁可现在烘对的地址、等生产补齐，也不要为了当下能跑
  * 而烘一个将来必须重发包才能改掉的测试地址。
  */
@@ -106,21 +107,19 @@ const BUILD_ENVIRONMENT: BuildEnvironment =
 export const DEFAULT_ISSUER = issuerForEnvironment(BUILD_ENVIRONMENT);
 
 /**
- * 本次 `login` 打哪个 issuer：显式 `--issuer` > 上次登录记住的 > 构建期烘进去的。
+ * 本次 `login` 打哪个 issuer：显式 `--issuer` > 构建期烘进去的。**没有第三档。**
  *
- * **中间那一档是 2026-09-09 补的**，此前 `--issuer` 每次都要重新带。补它的直接理由：包里
- * 烘的是生产地址，而生产上授权服务器还没部署（实测 discovery 404），所以在生产补上之前，
- * 演示要靠 `--issuer` 指到 view。若不记住，用户此后**每一条** `login` 都得重复带这个参数，
- * 忘一次就静默打回生产、在 discovery 那步失败，而报错看起来像 CLI 坏了。
+ * 〔沿革：2026-09-09 曾加过「上次登录记住的」这中间一档，2026-09-10 撤回。当时的理由是
+ * 「生产没部署完，演示要靠 --issuer 指到 view，不记住就每次都得带」——那个便利是真的，
+ * 但它把 issuer 拉进了 `clientId` / `resources` 那套「继承上一次」的语义里，而那套语义
+ * 当天就现了原形：存量配置里的旧 `client_id` 压过新包的默认值，登录一律 `2D002`。
+ * 三项一起撤，理由与取舍写在 `cli.ts` 的 `loginConfig`。〕
  *
- * 与 `clientId` / `resources` 同一口径（都是「显式 > 记住 > 内置」），此前 issuer 是三者中
- * 唯一不记的那个 —— 那个不对称本身就是个坑。
+ * 当前令牌绑在哪个 issuer 上是**另一件事**，存在钥匙串的 `StoredAuthorization` 里，
+ * 续期与 `auth status` 读的是那一份，与本函数无关。
  */
-export function configuredIssuer(
-  explicitIssuer: string | undefined,
-  savedIssuer?: string | undefined,
-): string {
-  return explicitIssuer ?? savedIssuer ?? DEFAULT_ISSUER;
+export function configuredIssuer(explicitIssuer: string | undefined): string {
+  return explicitIssuer ?? DEFAULT_ISSUER;
 }
 
 function configDirectory(): string {

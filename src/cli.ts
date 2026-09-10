@@ -16,9 +16,9 @@ import { systemCredentialStore } from "./credential-store.js";
 import { createOAuthClient } from "./oauth-client.js";
 import { fetchDocContent, fetchDocsIndex } from "./docs-service.js";
 import { syncSkills } from "./skills-service.js";
-import type { CliConfig } from "./types.js";
+import type { CliConfig, ConfigStore } from "./types.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 
 function usage(): string {
   return `PEP CLI ${VERSION}
@@ -32,7 +32,8 @@ Usage:
   pep docs list [--docs-url <url>]
   pep docs get <path> [--docs-url <url>]
 
-The issuer is built into this executable. Use --issuer only to override it temporarily.
+The issuer is built into this executable. --issuer overrides it for that one command and is
+NOT remembered — pass it every time you log in against a non-default deployment.
 --resource names which resource server the token is for (RFC 8707); repeat it for more than
 one. It defaults to the docs platform — a token minted without it is rejected by every
 resource server, and their answer looks exactly like "this token does not exist".
@@ -69,21 +70,52 @@ function option(args: string[], name: string): string | undefined {
   return value;
 }
 
-async function loginConfig(args: string[]): Promise<CliConfig> {
-  const store = fileConfigStore();
-  const saved = await store.read();
-  const issuer = configuredIssuer(option(args, "--issuer"), saved?.issuer);
-  const clientId = option(args, "--client-id") ?? saved?.clientId ?? DEFAULT_CLIENT_ID;
-  // 显式给了就用给的；否则沿用上次登录存下的；再否则用内置默认。**不会**是空数组 ——
-  // 没有受众的令牌在任何资源服务器那里都换不到东西。
+/** `store` 可注入只为可测：默认就是真配置文件。 */
+export async function loginConfig(
+  args: string[],
+  store: ConfigStore = fileConfigStore(),
+): Promise<CliConfig> {
+  // ⚠ **这三项刻意不沿用上次登录存下的值**（2026-09-10 改；此前是「显式 > 记住 > 内置」）。
+  //
+  // 同一个字段被当成两件事在用，而只有第一件是真需求：
+  //   ① 「当前这枚令牌绑在哪个 issuer / client 上」—— 续期、`auth status`、`auth token` 都要它，
+  //      但它**存在钥匙串里**（`StoredAuthorization`），不在 config.json，与本函数无关；
+  //   ② 「下一次 login 默认打哪」—— 只有这一件读 config.json，而让它继承上一次，就是所有
+  //      环境错配的来源。
+  //
+  // 继承带来的坑，两个都真的发生过：
+  //   · 早期版本把随机 `client_id` 烘进包里，用户本地存下了；改成固定名 `pep-cli` 之后，
+  //     存量配置里那个旧值**压过新包的默认值**，打任何环境都回 `2D002 invalid_client`
+  //     —— 而那句文案（"This application is not authorized to sign you in"）完全指不到
+  //     「你本地配置里有个旧 client_id」。
+  //   · `--resource urn:…:probe` 只在某一个环境登记过，被记住后跟着换环境 ⇒ `invalid_target`。
+  //
+  // 代价是生产上线前每次 `login` 都要带 `--issuer`。可接受：`login` 不是常跑的命令（令牌自动
+  // 续期），且生产上线后这个代价归零——不带参数就是生产。
+  //
+  // `docsUrl` **不在此列**（见下面 docs 分支）：它每次 `docs` 命令都要用、且不参与环境绑定语义，
+  // 记住它撞不出上面那类问题。
+  const issuer = configuredIssuer(option(args, "--issuer"));
+  const clientId = option(args, "--client-id") ?? DEFAULT_CLIENT_ID;
   const explicit = repeatedOption(args, "--resource");
-  const resources =
-    explicit.length > 0 ? explicit : (saved?.resources ?? [...DEFAULT_RESOURCES]);
+  const resources = explicit.length > 0 ? explicit : [...DEFAULT_RESOURCES];
   if (args.length > 0) throw new Error(`Unknown option: ${args[0]}`);
-  return { version: 1, issuer, clientId, redirectUri: DEFAULT_REDIRECT_URI, resources };
+  // `docsUrl` 要**显式带过来**：`login` 成功后 `auth-service` 用本对象整体覆写 config.json，
+  // 而它是那个文件里唯一一项不由本函数产出的字段 —— 不带上，每次重新登录都会把用户设过的
+  // 文档地址抹掉（既有缺陷，2026-09-10 随「三项不再记住」一并修：既然还宣称 docsUrl 记得住，
+  // 就不能让另一条路径悄悄清掉它）。
+  const saved = await store.read();
+  return {
+    version: 1,
+    issuer,
+    clientId,
+    redirectUri: DEFAULT_REDIRECT_URI,
+    resources,
+    ...(saved?.docsUrl !== undefined ? { docsUrl: saved.docsUrl } : {}),
+  };
 }
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
     console.log(usage());
@@ -208,7 +240,3 @@ async function main(): Promise<void> {
   throw new Error(`Unknown auth command.\n\n${usage()}`);
 }
 
-main().catch((error: unknown) => {
-  console.error(`pep: ${(error as Error).message}`);
-  process.exitCode = 1;
-});
