@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -382,6 +382,35 @@ describe("syncSkills —— 接进 agent 目录", () => {
 
     expect(await readdir(directory)).toEqual(["coding"]);
     expect(await readdir(linkInto)).toEqual(["coding"]);
+  });
+
+  // ⚠ 2026-09-11 真实复现过：链接目录的**父级本身是一条软链**时（macOS 上有人把 ~/.claude
+  // 挪到 iCloud / 外置卷，`/tmp` → `/private/tmp` 也是这形状），按逻辑路径算出的相对目标
+  // 会从链接的**真实**所在目录往上跳，落到不相干的地方 —— 建出来是一条**死链**，而
+  // `symlink()` 自己不报错（它不检查目标存不存在）。所以相对目标必须按物理位置算。
+  it("链接目录的父级是软链时，建出来的链接仍然读得到内容", async () => {
+    const physical = await mkdtemp(join(tmpdir(), "pep-physical-"));
+    const viaSymlink = join(await mkdtemp(join(tmpdir(), "pep-via-")), "claude");
+    await symlink(physical, viaSymlink);
+
+    await syncSkills({
+      ...deps(
+        vi.fn().mockResolvedValue(
+          archiveResponse({ [`${ROOT}/skills/coding/SKILL.md`]: "# coding" }),
+        ),
+        memoryStateStore(),
+      ),
+      linkInto: join(viaSymlink, "skills"),
+    });
+
+    // 经由软链路径读 —— 这是用户会走的那条
+    expect(await readFile(join(viaSymlink, "skills", "coding", "SKILL.md"), "utf8")).toBe(
+      "# coding",
+    );
+    // 也经由物理路径读一次：证明链接不是碰巧在逻辑路径下能解析
+    expect(await readFile(join(physical, "skills", "coding", "SKILL.md"), "utf8")).toBe(
+      "# coding",
+    );
   });
 
   it("链接目录里同名的东西被就地换掉，不是叠加", async () => {

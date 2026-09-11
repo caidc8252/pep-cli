@@ -1,6 +1,6 @@
 {
   "name": "@newlandnpt/pep-cli",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "PEP CLI —— 凭 PEP 身份读取 Newland 开发者文档与 agent skills",
   "license": "UNLICENSED",
   "type": "module",

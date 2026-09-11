@@ -1,6 +1,6 @@
-import { cp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { platform } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { readTar, type TarEntry } from "./tar.js";
 import type { SkillsState, SkillsStateStore } from "./types.js";
@@ -114,20 +114,43 @@ function describeFailure(status: number): string {
  * 代价是 junction 只能指目录、只能指本地卷 —— 对「一个 skill 一个目录」这个形状正好够用。
  * junction 还要求**绝对**目标路径，所以两条分支的 target 不同。
  *
+ * ── 相对目标要按**物理**位置算，不是逻辑路径 ─────────────────────────────────
+ * 相对符号链接由操作系统从**链接自己所在的真实目录**解析。若 `~/.claude` 本身是一条软链
+ * （macOS 上有人把它挪到 iCloud / 外置卷；`/tmp` → `/private/tmp` 也是这形状），按逻辑路径
+ * 算出的 `../../.agents/...` 会从那个真实目录往上跳，落到完全不相干的地方 —— **建出来是
+ * 一条死链**，而 `symlink()` 本身不会报错（它不检查目标存不存在）。
+ * 所以先把链接目录的父级 realpath 掉再算相对。2026-09-11 真实复现过一次。
+ *
  * ── 建不成就复制，不报错 ─────────────────────────────────────────────────────
  * 跨卷、文件系统不支持、权限被策略卡住 —— 这些都不该让整次同步失败。复制出来的东西照样能
  * 用，只是下次同步要重新复制一遍。回值告诉调用方走了哪条路，让它能如实汇报。
  */
+/**
+ * 目录的物理路径：父级 realpath 掉、basename 拼回去。
+ *
+ * 不整条 realpath 的理由：`linkPath` 自己可能还不存在（我们正要创建它），realpath 会 ENOENT。
+ * 取不到就退回逻辑路径 —— 那至少是原来的行为，不会更糟。
+ */
+async function physicalDir(path: string): Promise<string> {
+  const absolute = resolve(path);
+  try {
+    return join(await realpath(dirname(absolute)), basename(absolute));
+  } catch {
+    return absolute;
+  }
+}
+
 async function linkSkill(
   canonicalSkillDir: string,
   linkPath: string,
 ): Promise<"linked" | "copied"> {
   await rm(linkPath, { recursive: true, force: true });
-  await mkdir(dirname(linkPath), { recursive: true });
+  const linkDir = dirname(linkPath);
+  await mkdir(linkDir, { recursive: true });
   try {
     const junction = platform() === "win32";
     await symlink(
-      junction ? canonicalSkillDir : relative(dirname(linkPath), canonicalSkillDir),
+      junction ? canonicalSkillDir : relative(await physicalDir(linkDir), canonicalSkillDir),
       linkPath,
       junction ? "junction" : undefined,
     );

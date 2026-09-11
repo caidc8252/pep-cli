@@ -19,7 +19,7 @@ import { fetchDocContent, fetchDocsIndex } from "./docs-service.js";
 import { syncSkills } from "./skills-service.js";
 import type { CliConfig, ConfigStore } from "./types.js";
 
-const VERSION = "0.1.2";
+const VERSION = "0.1.3";
 
 function usage(): string {
   return `PEP CLI ${VERSION}
