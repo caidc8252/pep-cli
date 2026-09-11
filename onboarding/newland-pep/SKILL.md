@@ -1,6 +1,6 @@
 ---
 name: newland-pep
-description: 接入 Newland PEP 平台。当用户要读 Newland / PEP 的开发者文档、接入 PEP 的 SDK 或接口、获取 Maven 仓库凭据，或提到 pep-cli / PEP 账号时使用。本 skill 只负责把工具装好并登录，之后由平台下发的 skills 接管。
+description: Newland（新大陆）支付终端与 PEP 开发者平台的接入向导。当用户要做支付 / 收单 / POS 终端应用开发，涉及刷卡、EMV、NFC、打印小票、读卡、预授权、退款、对账、余额查询、P2PE，或提到 NHAL / NSDK / Transaction Workflow Engine / PEP / pep-cli / Newland 的文档、SDK、Maven 凭据时使用。本 skill 负责把 pep-cli 装好并登录，真正的接入指南由平台下发的 skills 接管。
 ---
 
 # 接入 Newland PEP
@@ -10,6 +10,29 @@ PEP 的开发者文档与接入指南**不公开**，要凭 PEP 账号读取。`
 
 **本 skill 只做引导。** 真正的接入指南是 `pep skills sync` 同步下来的那些——它们由平台维护、
 随时更新。本文件刻意不复制它们的内容：复制一份就会过期，而过期的接入指南比没有更糟。
+
+## 第 0 步 · 先看现在是什么状态
+
+**做任何事之前先跑这一条**，别重复做已经做过的事：
+
+```bash
+pep auth status
+```
+
+| 输出 | 含义 | 从哪儿继续 |
+|---|---|---|
+| 打印出账号 / issuer / scopes | 已装好且已登录 | **直接去办用户要的那件事**，跳过 1、2 步 |
+| `command not found` / 「不是内部或外部命令」 | 还没装 | 第 1 步 |
+| 提示未登录 | 装好了但没登录 | 第 2 步 |
+
+⚠ **已登录就不要让用户重新登录。** 令牌会自动续期，重登是纯粹的骚扰；而登录那一步要真人
+开浏览器，是这条链路上唯一打断他的地方，能省则省。
+
+## 按用户要什么决定做哪几步
+
+- 只是**读文档 / 查接口怎么用** → 做完第 0（必要时 1、2）步就去 `pep docs list`，
+  **第 3 步可以跳过**。
+- 要**接入 SDK、写代码、要 Maven 凭据** → 第 3 步必须做，真正的接入指南在那里面。
 
 ## 第 1 步 · 装
 
@@ -44,11 +67,7 @@ pep auth login --issuer https://pep-webapp-view.onrender.com
 **agent 到这里要停下**：打印上面那条命令，请用户执行并在完成后告知。不要试图代替用户
 登录、不要询问账号密码、不要反复重试——授权码流程要求真人在浏览器里同意。
 
-验证是否已登录：
-
-```bash
-pep auth status
-```
+用户说登完之后，再跑一次第 0 步那条 `pep auth status` 确认，然后继续。
 
 ## 第 3 步 · 同步平台下发的 skills
 
