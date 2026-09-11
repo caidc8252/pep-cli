@@ -303,3 +303,102 @@ describe("syncSkills —— 落盘", () => {
     );
   });
 });
+
+// ⚠ 这一组钉的是「一份实体 + 一条链接」这个落盘模型（2026-09-11）。
+//
+// canonical 写进 `~/.agents/skills` —— 那是 22 家 agent 共读的通用目录；只有 Claude Code 坚持
+// 自己的 `~/.claude/skills`，所以额外接一条链给它。这样一次同步覆盖 23 家，而要维护的常量只有
+// 两个路径 —— 替代方案是维护一张「每家 agent 的目录」表（上游 skills 包里那张有 79 项）。
+describe("syncSkills —— 接进 agent 目录", () => {
+  let linkInto: string;
+
+  beforeEach(async () => {
+    linkInto = await mkdtemp(join(tmpdir(), "pep-link-"));
+  });
+
+  it("canonical 写实体，链接目录里读到的是同一份内容", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      archiveResponse({ [`${ROOT}/skills/coding/SKILL.md`]: "# coding" }),
+    );
+    const result = await syncSkills({
+      ...deps(fetchImpl, memoryStateStore()),
+      linkInto,
+    });
+
+    expect(result).toMatchObject({ status: "written", linkedInto: linkInto });
+    // ⚠ 钉住「走的是链接那条路」。只断言 status + linkedInto 的话，symlink 若一直静默失败、
+    // 每次都退回复制，这条测试照样绿 —— 而那正是最该被发现的坏法（功能还在，但更新不再
+    // 只动一处，canonical 与各 agent 目录会分叉）。`copiedCount` 只在降级时出现。
+    expect("copiedCount" in result).toBe(false);
+    // 实体在 canonical
+    expect(await readFile(join(directory, "coding", "SKILL.md"), "utf8")).toBe("# coding");
+    // 链接那一侧读到的是同一份 —— 不断言它是 symlink 还是副本：建不成链接时会降级成复制，
+    // 那也是成功。要断言的是「读得到同样的内容」，那才是用户关心的事。
+    expect(await readFile(join(linkInto, "coding", "SKILL.md"), "utf8")).toBe("# coding");
+  });
+
+  it("不给 linkInto（即 --dir）时只铺一份，不往别处写", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      archiveResponse({ [`${ROOT}/skills/coding/SKILL.md`]: "# coding" }),
+    );
+    const result = await syncSkills(deps(fetchImpl, memoryStateStore()));
+
+    expect(result).toMatchObject({ status: "written" });
+    expect("linkedInto" in result).toBe(false);
+    expect(await readdir(linkInto)).toEqual([]);
+  });
+
+  it("上游删掉的 skill，canonical 与链接**两处都清** —— 只清一边会留下死链", async () => {
+    const store = memoryStateStore();
+    await syncSkills({
+      ...deps(
+        vi.fn().mockResolvedValue(
+          archiveResponse(
+            {
+              [`${ROOT}/skills/coding/SKILL.md`]: "# coding",
+              [`${ROOT}/skills/retired/SKILL.md`]: "# retired",
+            },
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          ),
+        ),
+        store,
+      ),
+      linkInto,
+    });
+    expect(await readdir(linkInto)).toEqual(["coding", "retired"]);
+
+    await syncSkills({
+      ...deps(
+        vi.fn().mockResolvedValue(
+          archiveResponse(
+            { [`${ROOT}/skills/coding/SKILL.md`]: "# coding" },
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          ),
+        ),
+        store,
+      ),
+      linkInto,
+    });
+
+    expect(await readdir(directory)).toEqual(["coding"]);
+    expect(await readdir(linkInto)).toEqual(["coding"]);
+  });
+
+  it("链接目录里同名的东西被就地换掉，不是叠加", async () => {
+    await mkdir(join(linkInto, "coding"), { recursive: true });
+    await writeFile(join(linkInto, "coding", "STALE.md"), "旧的");
+
+    await syncSkills({
+      ...deps(
+        vi.fn().mockResolvedValue(
+          archiveResponse({ [`${ROOT}/skills/coding/SKILL.md`]: "# coding" }),
+        ),
+        memoryStateStore(),
+      ),
+      linkInto,
+    });
+
+    expect(await readdir(join(linkInto, "coding"))).toEqual(["SKILL.md"]);
+  });
+});
+

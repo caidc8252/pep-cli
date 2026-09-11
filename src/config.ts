@@ -140,16 +140,33 @@ export function skillsStatePath(): string {
 }
 
 /**
- * `pep skills sync` 的默认落点。
+ * `pep skills sync` 的 canonical 落点：**通用 agent 目录**。
  *
- * **个人级而不是项目级**：本仓这类项目把自己的 `.claude/skills/` 提交进版本库，往那儿写会和
- * 项目自己管着的 skill 撞在同一个目录里 —— 同步下来的算不算改动、要不要 gitignore，每个项目
- * 都得单独回答一遍。写个人级没有这个问题，一次同步这台机器上所有项目都看得见。
+ * `~/.agents/skills` 不是我们发明的，是跨 agent 的既成约定 —— Codex / Cursor / Amp /
+ * Antigravity 等 **22 家**直接读它（2026-09-11 按 `skills@1.5.25` 的 agent 表点算）。所以
+ * 铺一份到这里，就同时服务了这 22 家；Claude Code 是唯一例外，它坚持自己的目录，由
+ * `claudeSkillsDirectory()` 那条链接覆盖。
  *
- * ⚠ 路径在三个平台上是同一个 —— `~/.claude` 是 Claude Code 自己的约定，不随平台变；
- * 本 CLI 自己的配置目录才按平台分叉（见 `configDirectory`）。
+ * 这样做的替代方案是维护一张「每家 agent 的目录」表 —— 上游那张有 79 项，且每家自己在改。
+ * 一份实体 + 一条链接换来同样的覆盖面，而要跟的常量只有两个。
+ *
+ * **个人级而不是项目级**：项目会把自己的 skills 目录提交进版本库，往那儿写会和项目自己管着
+ * 的 skill 撞在一起 —— 同步下来的算不算改动、要不要 gitignore，每个项目都得单独回答一遍。
+ * 写个人级没有这个问题，一次同步这台机器上所有项目都看得见。
+ *
+ * ⚠ 路径在三个平台上是同一个（agent 们自己的约定不随平台变）；本 CLI 自己的配置目录才按
+ * 平台分叉（见 `configDirectory`）。
  */
 export function defaultSkillsDirectory(): string {
+  return join(homedir(), ".agents", "skills");
+}
+
+/**
+ * Claude Code 的 skills 目录 —— `sync` 默认把 canonical 那份链接到这里。
+ *
+ * 它是 22 家共读 `~/.agents/skills` 之外的唯一例外，所以单独出一个常量、而不是起一张表。
+ */
+export function claudeSkillsDirectory(): string {
   return join(homedir(), ".claude", "skills");
 }
 
@@ -202,7 +219,9 @@ function isSkillsState(value: unknown): value is SkillsState {
     typeof candidate.directory === "string" &&
     Array.isArray(candidate.skills) &&
     candidate.skills.every((one) => typeof one === "string") &&
-    (candidate.commit === undefined || typeof candidate.commit === "string")
+    (candidate.commit === undefined || typeof candidate.commit === "string") &&
+    // 可选：0.1.1 及更早写下的 skills.json 没有这个键，读它们不该报「状态损坏」。
+    (candidate.linkedInto === undefined || typeof candidate.linkedInto === "string")
   );
 }
 

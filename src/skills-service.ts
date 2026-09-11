@@ -1,5 +1,6 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { cp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { platform } from "node:os";
+import { dirname, join, relative } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { readTar, type TarEntry } from "./tar.js";
 import type { SkillsState, SkillsStateStore } from "./types.js";
@@ -20,6 +21,10 @@ export type SkillsSyncResult =
       fileCount: number;
       removed: string[];
       directory: string;
+      /** 接进了哪个 agent 目录（`--dir` 显式指定时不接，为 undefined）。 */
+      linkedInto?: string;
+      /** 有多少个是复制而不是链接过去的 —— 建链接失败时的降级，如实汇报。 */
+      copiedCount?: number;
     };
 
 /**
@@ -61,7 +66,13 @@ export function planSkillFiles(entries: readonly TarEntry[]): SkillFile[] {
 export type SkillsSyncDependencies = {
   issuer: string;
   accessToken: string;
+  /** canonical 落点。默认 `~/.agents/skills`（22 家 agent 共读的通用目录）。 */
   directory: string;
+  /**
+   * 铺完之后再接进哪个 agent 目录（默认 `~/.claude/skills` —— 只有 Claude Code 不读通用目录）。
+   * `undefined` = 调用方给了 `--dir`，那时只铺一份、不接任何链接。
+   */
+  linkInto?: string;
   stateStore: SkillsStateStore;
   fetch?: typeof globalThis.fetch;
 };
@@ -87,6 +98,44 @@ function describeFailure(status: number): string {
     return "PEP could not reach the skills repository. Retry shortly, or ask an operator whether this deployment serves skills.";
   }
   return `PEP answered ${status}.`;
+}
+
+/**
+ * 把 canonical 目录里的一个 skill 接到某个 agent 的 skills 目录下。
+ *
+ * ── 为什么是「一份实体 + 链接」而不是各写一份 ─────────────────────────────────
+ * `~/.agents/skills` 是**通用约定**：Codex / Cursor / Amp / Antigravity 等 22 家 agent 直接
+ * 读它。只有 Claude Code 坚持自己的 `~/.claude/skills`，所以只需要给它接一条链，一次同步
+ * 就覆盖了 23 家 —— 而不是维护一张「每家 agent 的目录」的表（上游 `skills` 包里那张有 79 项，
+ * 且每家自己在改）。更新也只动 canonical 那一份。
+ *
+ * ── Windows 用 junction，不是 symlink ────────────────────────────────────────
+ * 真符号链接在 Windows 上要开发者模式或管理员权限；**目录联接（junction）普通用户就能建**。
+ * 代价是 junction 只能指目录、只能指本地卷 —— 对「一个 skill 一个目录」这个形状正好够用。
+ * junction 还要求**绝对**目标路径，所以两条分支的 target 不同。
+ *
+ * ── 建不成就复制，不报错 ─────────────────────────────────────────────────────
+ * 跨卷、文件系统不支持、权限被策略卡住 —— 这些都不该让整次同步失败。复制出来的东西照样能
+ * 用，只是下次同步要重新复制一遍。回值告诉调用方走了哪条路，让它能如实汇报。
+ */
+async function linkSkill(
+  canonicalSkillDir: string,
+  linkPath: string,
+): Promise<"linked" | "copied"> {
+  await rm(linkPath, { recursive: true, force: true });
+  await mkdir(dirname(linkPath), { recursive: true });
+  try {
+    const junction = platform() === "win32";
+    await symlink(
+      junction ? canonicalSkillDir : relative(dirname(linkPath), canonicalSkillDir),
+      linkPath,
+      junction ? "junction" : undefined,
+    );
+    return "linked";
+  } catch {
+    await cp(canonicalSkillDir, linkPath, { recursive: true });
+    return "copied";
+  }
 }
 
 /**
@@ -142,7 +191,20 @@ export async function syncSkills(
     await writeFile(target, file.data);
   }
 
+  // 接进 agent 目录。`linkInto` 为空 = 调用方显式指定了 `--dir`，那时只铺一份、不接。
+  let copiedCount = 0;
+  if (dependencies.linkInto !== undefined) {
+    for (const skill of skills) {
+      const how = await linkSkill(
+        join(dependencies.directory, skill),
+        join(dependencies.linkInto, skill),
+      );
+      if (how === "copied") copiedCount += 1;
+    }
+  }
+
   // 上次写过、这次没有了的，移除。**只移除记在账上的** —— 用户自己放的 skill 不归我们管。
+  // canonical 与链接两处都要清：只清一边会留下一条指向空处的死链（或一份永不更新的副本）。
   const removed = (previous?.skills ?? []).filter(
     (skill) => !skills.includes(skill),
   );
@@ -151,12 +213,16 @@ export async function syncSkills(
       recursive: true,
       force: true,
     });
+    if (previous?.linkedInto !== undefined) {
+      await rm(join(previous.linkedInto, skill), { recursive: true, force: true });
+    }
   }
 
   const state: SkillsState = {
     version: 1,
     skills,
     directory: dependencies.directory,
+    ...(dependencies.linkInto !== undefined ? { linkedInto: dependencies.linkInto } : {}),
     ...(commit ? { commit } : {}),
   };
   await dependencies.stateStore.write(state);
@@ -167,6 +233,8 @@ export async function syncSkills(
     fileCount: files.length,
     removed,
     directory: dependencies.directory,
+    ...(dependencies.linkInto !== undefined ? { linkedInto: dependencies.linkInto } : {}),
+    ...(copiedCount > 0 ? { copiedCount } : {}),
     ...(commit ? { commit } : {}),
   };
 }

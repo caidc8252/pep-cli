@@ -67,8 +67,13 @@ export type SkillsState = {
   commit?: string;
   /** 上次写进磁盘的 skill 名字。**只有这些才允许被删** —— 用户自己放的 skill 不归我们管。 */
   skills: string[];
-  /** 上次写到哪儿。换目录后旧的那批要照着它清掉。 */
+  /** 上次写到哪儿（canonical）。换目录后旧的那批要照着它清掉。 */
   directory: string;
+  /**
+   * 上次把链接接进了哪个 agent 目录。移除某个 skill 时两处都要清 —— 只清 canonical 会
+   * 留下一条指向空处的死链。`undefined` = 上次用了 `--dir`，没接链接。
+   */
+  linkedInto?: string;
 };
 
 export interface SkillsStateStore {
