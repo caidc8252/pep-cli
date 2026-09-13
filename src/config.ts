@@ -38,9 +38,28 @@ export const DEFAULT_REDIRECT_URI = "http://localhost:53682/callback";
 // 只想读文档的人，会因为一个他根本用不到的能力而登不进去 —— 而错误来自服务端，命令行上
 // 看不出是默认清单在捣鬼。2026-09-07 栽过一次，只能退回上一个提交重新构建。
 //
-// 所以**新登记一枚客户端时，这两个业务 scope 要一起给**；给旧客户端加 scope 之后，存量
+// `nexus-credentials:write` 是 `pep nexus setup` 的必要条件（代客户在 Maven 私服上开凭据）。
+// 它是这张清单里**唯一一个「写」类** scope：前三个是身份，`docs:read` / `skills:read` 放行的
+// 是读，而它放行的是「在另一个系统上创建一个长期有效的账号」。即便如此它也不是判据的全部 ——
+// 服务端那侧还要判契约（`contract_types` 含 ADMIN），scope 只答「哪个客户端可以问」。
+//
+// 所以**新登记一枚客户端时，这三个业务 scope 要一起给**；给旧客户端加 scope 之后，存量
 // 令牌不会自动获得它，用户得重新 `pep auth login`。
-export const DEFAULT_SCOPES = ["openid", "profile", "email", "docs:read", "skills:read"] as const;
+//
+// ⚠⚠ **`nexus-credentials:write` 是 2026-09-13 新加进这张清单的，发版前必须先落实上面
+// 那条前提。** 它现在还**没有**出现在任何环境的 `pep-cli` 客户端 `allowed_scopes` 里（nexus
+// 服务端当时尚未合并部署）。带着它发一版包出去，后果不是「开不了凭据」，而是**所有人一律
+// 登不进去** —— 正是上面记的 2026-09-07 那次。发版前的动作写在
+// `pep-package/saas-us/release/v1.1.0/oauth-server-setup.md` 与部署文档的「CLI 新增 scope」
+// 一行：去登记台把它加进 C-1 那枚客户端的授权范围，每个环境都要。
+export const DEFAULT_SCOPES = [
+  "openid",
+  "profile",
+  "email",
+  "docs:read",
+  "skills:read",
+  "nexus-credentials:write",
+] as const;
 
 /**
  * 默认申请的受众（RFC 8707 的 `resource`）—— 这枚令牌准备拿去访问谁。

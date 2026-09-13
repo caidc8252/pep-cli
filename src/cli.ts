@@ -16,10 +16,12 @@ import {
 import { systemCredentialStore } from "./credential-store.js";
 import { createOAuthClient } from "./oauth-client.js";
 import { fetchDocContent, fetchDocsIndex } from "./docs-service.js";
+import { USERNAME_VAR, PASSWORD_VAR } from "./maven-env.js";
+import { setupNexusCredential } from "./nexus-service.js";
 import { syncSkills } from "./skills-service.js";
 import type { CliConfig, ConfigStore } from "./types.js";
 
-const VERSION = "0.1.3";
+const VERSION = "0.2.0";
 
 function usage(): string {
   return `PEP CLI ${VERSION}
@@ -32,6 +34,7 @@ Usage:
   pep skills sync [--dir <path>]
   pep docs list [--docs-url <url>]
   pep docs get <path> [--docs-url <url>]
+  pep nexus setup
 
 The issuer is built into this executable. --issuer overrides it for that one command and is
 NOT remembered — pass it every time you log in against a non-default deployment.
@@ -52,7 +55,17 @@ hand is left alone.
 
 \`pep docs list\` prints the documents this account can read (path + description); feed a path
 straight to \`pep docs get\` to print that document as markdown on stdout. The documentation
-site is built in (${DEFAULT_DOCS_URL}); --docs-url overrides it and is then remembered.`;
+site is built in (${DEFAULT_DOCS_URL}); --docs-url overrides it and is then remembered.
+
+\`pep nexus setup\` asks PEP for this organisation's Maven repository credential and saves it as
+the two environment variables the Newland Android SDK reads — \`${USERNAME_VAR}\` and
+\`${PASSWORD_VAR}\` — so you do not copy anything by hand. On Windows it writes them to your user
+environment (\`setx\`); on macOS it keeps a marked block in your shell profile, backing the file up
+first and touching nothing else. Either way persistence only affects NEW shells, so the two lines
+are also printed on stdout: \`eval "$(pep nexus setup)"\` uses them in the current one.
+Only Android needs this — the Windows and iOS SDKs are cloned from Git, not pulled from Maven.
+The password is shown by PEP once and never stored, so a second run reports 409 rather than
+handing it out again.`;
 }
 
 /** 可重复的选项，按出现顺序取值。`--resource` 是唯一一个 —— RFC 8707 允许一次带多个受众。 */
@@ -133,7 +146,7 @@ export async function main(): Promise<void> {
     return;
   }
   const group = args.shift();
-  if (group !== "auth" && group !== "skills" && group !== "docs")
+  if (group !== "auth" && group !== "skills" && group !== "docs" && group !== "nexus")
     throw new Error(`Unknown command.\n\n${usage()}`);
   const command = args.shift();
   const configStore = fileConfigStore(configPath());
@@ -179,6 +192,44 @@ export async function main(): Promise<void> {
     }
     // 正文原样写 stdout，不加任何装饰 —— 调用方多半要把它管道给别的东西。
     process.stdout.write(await fetchDocContent(dependencies, path as string));
+    return;
+  }
+
+  if (group === "nexus") {
+    if (command !== "setup") throw new Error(`Unknown nexus command.\n\n${usage()}`);
+    if (args.length > 0) throw new Error(`Unknown option: ${args[0]}`);
+    const authorization = await auth.currentAuthorization();
+    const result = await setupNexusCredential({
+      issuer: authorization.issuer,
+      accessToken: authorization.accessToken,
+    });
+
+    // ⚠ 两行走 **stdout**，说明全走 stderr —— 与 `pep auth token` 同一口径：给机器读的
+    // 可以直接 `eval "$(pep nexus setup)"` 让**当前**这个 shell 立刻能用，而持久化那一半
+    // 无论在哪个平台都只对**新** shell 生效。
+    console.log(result.lines);
+
+    const persisted = result.persisted;
+    if (persisted.status === "windows") {
+      console.error(`Saved ${USERNAME_VAR} and ${PASSWORD_VAR} to your Windows user environment.`);
+      console.error("Existing terminals do not see them — open a new one (or use the lines above).");
+    } else if (persisted.status === "manual") {
+      // 没落盘。凭据已经换走了且 PEP 不存密码，所以上面那两行就是全部 —— 说清楚。
+      console.error(
+        `Nothing was written${persisted.path ? ` to ${persisted.path}` : ""}: ${persisted.reason}`,
+      );
+      console.error("The two lines above are the only copy — PEP does not store the password.");
+    } else {
+      console.error(
+        persisted.status === "profile-replaced"
+          ? `Replaced the pep-cli block in ${persisted.path}`
+          : `Appended a pep-cli block to ${persisted.path}`,
+      );
+      // 备份路径必须打出来 —— 改的是用户自己的 profile，出了意外要能一条命令回去。
+      if (persisted.backupPath) console.error(`Backup: ${persisted.backupPath}`);
+      console.error("New shells will have it; this one will not until you re-source the profile.");
+    }
+    console.error(`Nexus user: ${result.username}`);
     return;
   }
 

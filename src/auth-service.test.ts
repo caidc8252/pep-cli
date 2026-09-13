@@ -99,8 +99,12 @@ describe("auth service", () => {
     const parsed = new URL(launchedUrl);
     // ⚠ 这条断言钉的是默认申请哪几个 scope。改动它之前先读 config.ts 那段注释：默认清单里
     // 出现任何一个客户端未获准的 scope，会让**整个登录**被 `invalid_scope` 拒掉。
+    //
+    // `nexus-credentials:write` 于 2026-09-13 加入（`pep nexus setup` 要它）。⚠ 它在每个环境的
+    // `pep-cli` 客户端 `allowed_scopes` 里都必须先登记好，这一版才能发出去 —— 这条断言红了就是
+    // 在提醒你：默认清单动过了，去确认那件事做了没有。
     expect(parsed.searchParams.get("scope")).toBe(
-      "openid profile email docs:read skills:read",
+      "openid profile email docs:read skills:read nexus-credentials:write",
     );
     expect(parsed.searchParams.get("code_challenge_method")).toBe("S256");
     expect(oauth.exchangeCode).toHaveBeenCalledWith(

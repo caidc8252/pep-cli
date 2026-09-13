@@ -32,7 +32,8 @@ pep auth status
 
 - 只是**读文档 / 查接口怎么用** → 做完第 0（必要时 1、2）步就去 `pep docs list`，
   **第 3 步可以跳过**。
-- 要**接入 SDK、写代码、要 Maven 凭据** → 第 3 步必须做，真正的接入指南在那里面。
+- 要**接入 SDK、写代码** → 第 3 步必须做，真正的接入指南在那里面。
+- 要**拉 Maven 包**（`mvn install` 报 401 / 找不到 Newland 的依赖）→ 还要做第 4 步。
 
 ## 第 1 步 · 装
 
@@ -81,6 +82,46 @@ pep skills sync
 **同步完要主动去读那些文件**：新写入的 skill 不一定当场被会话发现。直接读
 `~/.claude/skills/<名字>/SKILL.md`，不要等它自动出现。
 
+## 第 4 步 · 配 Maven 仓库凭据（**只有 Android** 要拉包才做）
+
+```bash
+pep nexus setup
+```
+
+它替用户向 PEP 要一份本公司的 Nexus 凭据，落成 SDK 文档里 Gradle 读的那两个环境变量
+（`NEWLAND_MAVEN_USERNAME` / `NEWLAND_MAVEN_PASSWORD`），不用任何人手工复制粘贴。
+
+⚠ **只有 Android 需要这一步。** Windows 与 iOS 的 SDK 都是 `git clone` 取的（C# 走本地 NuGet
+源，iOS 直接引 framework），跟 Maven 无关 —— 别给这两个平台的用户跑。
+
+### 落在哪、什么时候生效
+
+| 平台 | 写到哪 | 生效范围 |
+|---|---|---|
+| Windows | 用户级环境变量（`setx`） | **新开的窗口**，当前这个没有 |
+| macOS | `~/.zshrc` 或 `~/.bash_profile` 里一段带围栏的块 | 新开的 shell |
+
+两个平台都**另外**把两行打到 stdout，所以当前这个 shell 要立刻能用就：
+
+```bash
+eval "$(pep nexus setup)"
+```
+
+改 `~/.zshrc` 之前会**先备份**（路径会打出来），且只动它自己那一段围栏，用户其余配置逐字不动。
+
+### ⚠ 密码只出现这一次，PEP 自己不存
+
+- 命令跑成功就算完了，不必也无法再取一次；
+- 第二次跑会回 409「已经开过」，**那不是出错**，是这家公司已经有凭据了；
+- 万一它说「Nothing was written」（profile 结构认不出、或备份没写成），**stdout 上那两行就是
+  全部凭据**，当场贴进 profile 或存下来，关掉窗口就找不回来了。
+
+### 拿不到凭据时，两种 403 要分清
+
+- **契约不含 Maven 仓库访问** → 找新大陆的商务，重新登录没有用；
+- **这枚客户端没获准 `nexus-credentials:write`** → 找 PEP 管理员加进 allowed_scopes，然后
+  重新 `pep auth login`（存量令牌不会自动获得新 scope）。
+
 ## 读文档
 
 ```bash
@@ -110,6 +151,9 @@ curl 或别的 HTTP 客户端要直接打 PEP 接口时用它。**不要把令�
 | `docs get` 回 403 | 有账号但没这一篇的权限 | 同上 |
 | `skills sync` 回 503 | **平台侧**的问题（上游仓库没配好或不可达） | 报给 PEP 管理员，重试无用 |
 | `invalid_scope` / 400 | 这个环境的客户端登记与 CLI 版本不匹配 | 报给 PEP 管理员 |
+| `nexus setup` 回 409 | **不是错误**：这家公司已经开过凭据了 | 用之前存下的那份；丢了找 PEP 管理员在 Nexus 上重置 |
+| `nexus setup` 回 503 | 平台侧没配好 Nexus 或上游不可达 | 报给 PEP 管理员，重试无用 |
+| 跑完了但 Gradle 仍 401 | 环境变量只对**新** shell 生效 | 开个新终端，或 `eval "$(pep nexus setup)"` |
 
 **503 和 403 要分清**：403 是「你的权限不够」，503 是「平台自己出问题了」。前者找管理员开
 权限，后者找管理员修——都不是靠重试能解决的。
