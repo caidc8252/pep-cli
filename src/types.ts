@@ -55,18 +55,22 @@ export interface ConfigStore {
 }
 
 /**
- * 上一次同步留下的账 —— 单独一个文件，不并进 `CliConfig`。
+ * 上一次更新留下的账 —— 单独一个文件，不并进 `CliConfig`。
  *
  * 分开是因为登录会**整份重写** config（`auth-service.login` 里的 `configStore.write`），
- * 同步状态并进去就会被一次重新登录抹掉，而那时本地磁盘上的 skills 还在 —— 账和事实对不上，
- * 下一次同步会以为什么都没同步过。
+ * 状态并进去就会被一次重新登录抹掉，而那时本地磁盘上的 skills 还在 —— 账和事实对不上，
+ * 下一次更新会以为什么都没装过。
  *
- * ⚠ **v2 起按「包」分账**（2026-09-14）。此前整个平台只下发一个包，所以账是扁的：一个
- * `commit` + 一串 skill 名。现在 PEP 那侧是一张目录表、可以按名字要，于是「装了哪几个包」
- * 本身成了要记的事 —— 没有它，`sync` 不知道该刷新谁，`add` 也不知道哪些是自己装的。
+ * ── v3 起逐个 skill 记内容哈希（2026-09-14）────────────────────────────────────
+ * v2 只记「这个包铺出了哪些 skill 名」，能回答的问题止于「哪些目录是我们的」。而用户真正
+ * 想知道的是「**我关心的那个 skill 变了没有**」—— 只比仓库 commit 答不了：仓里改一行
+ * README、动一下 `evals/`，commit 就变了，于是每个 skill 都被报成「更新了」。
+ *
+ * 逐个记哈希之后，`update` 能分出 updated / unchanged。做法参照 `npx skills` 的
+ * `.skill-lock.json`（它逐 skill 记 `skillFolderHash`，按 source+ref 分组取一次源再逐个比）。
  */
 export type SkillsState = {
-  version: 2;
+  version: 3;
   /** 上次写到哪儿（canonical）。换目录后旧的那批要照着它清掉。 */
   directory: string;
   /**
@@ -74,7 +78,7 @@ export type SkillsState = {
    * 留下一条指向空处的死链。`undefined` = 上次用了 `--dir`，没接链接。
    */
   linkedInto?: string;
-  /** 装过哪些包，键是 PEP 目录里的名字。 */
+  /** 装过哪些包，键是调用方给的那串仓库地址（**原样，不规范化**）。 */
   packages: Record<string, SkillsPackageState>;
 };
 
@@ -82,24 +86,30 @@ export type SkillsPackageState = {
   /** 上次装下的那个提交（PEP 的 `X-Skills-Commit`）。服务端摘不到时没有这个键。 */
   commit?: string;
   /**
-   * 这个包上次在磁盘上铺出了哪些 skill 目录。**只有这些才允许被删** —— 用户自己放的、
-   * 以及别的包铺的，都不归它管。
+   * 这个包上次铺出的每个 skill → 它的内容哈希。
+   *
+   * ⚠ 键就是「**只有这些才允许被删**」的那张名单 —— 用户自己放的、以及别的包铺的，都不归
+   * 它管。值是 v3 新加的：空串 = 从 v2 迁过来、哈希未知，那一档一律当作「变了」，因为
+   * 「不知道」不该被说成「没变」。
    */
-  skills: string[];
+  skills: Record<string, string>;
 };
 
-/**
- * v1 的账（2026-09-14 之前）。**只读**：遇到就迁到 v2，不再写回这个形状。
- *
- * ⚠ 迁移时把那一串 skill 归到 `LEGACY_PACKAGE` 名下 —— 当时只有一个包，那串名字就是它铺的。
- * 认不出来的话，下一次同步会把用户已装的 skill 当成「不是我们装的」而永远不清理。
- */
+/** v1 的账（2026-09-14 之前）。**只读**：遇到就迁到最新，不再写回这个形状。 */
 export type SkillsStateV1 = {
   version: 1;
   commit?: string;
   skills: string[];
   directory: string;
   linkedInto?: string;
+};
+
+/** v2 的账。同样只读 —— 它的 `skills` 是名字数组，没有哈希。 */
+export type SkillsStateV2 = {
+  version: 2;
+  directory: string;
+  linkedInto?: string;
+  packages: Record<string, { commit?: string; skills: string[] }>;
 };
 
 export interface SkillsStateStore {

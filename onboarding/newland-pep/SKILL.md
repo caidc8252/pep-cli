@@ -87,8 +87,16 @@ pep skills add 群/子群/仓@分支名              # 指定分支（skill 在�
 ⚠ **地址要向 PEP 管理员要**，本 skill 刻意不写死一个 —— 写死一份就会过期，而过期的地址
 比没有更糟。
 
-装完之后 `pep skills sync` 刷新**已经装过的全部**，不用再报地址；`pep skills list` 列出
-你装过哪些。
+装完之后：
+
+```bash
+pep skills list             # 你装过哪些
+pep skills update           # 刷新全部已装的
+pep skills update <仓库地址> # 只刷新指定的那些
+```
+
+⚠ `update` 会分别说**哪些 skill 真的变了**、哪些没变。仓里改了 README 或 `evals/` 这类
+与 skill 无关的东西时，它会如实说「仓库动了，但这些 skill 没变」——不要把那读成出错。
 
 它把接入指南写进 Claude Code 找 skill 的目录（`~/.claude/skills`，`--dir` 可改）。
 只动它自己写过的那些，用户手放进去的文件不碰。
@@ -169,7 +177,7 @@ curl 或别的 HTTP 客户端要直接打 PEP 接口时用它。**不要把令�
 | `2D002` / "This application is not authorized to sign you in." | 这个环境上没有 CLI 用的那枚客户端；或本地存着 0.1.1 之前版本留下的旧 client_id | 先确认装的是最新版（`pep --version` ≥ 0.1.1）；仍旧报错就 `pep auth logout` 再重登 |
 | `docs list` 是空的 | 登录成功了，但这个账号没被授予任何文档 | 找 PEP 管理员开权限，不是 CLI 的问题 |
 | `docs get` 回 403 | 有账号但没这一篇的权限 | 同上 |
-| `skills add` / `sync` 回 503 | **平台侧**的问题（上游仓库没配好或不可达） | 报给 PEP 管理员，重试无用 |
+| `skills add` / `update` 回 503 | **平台侧**的问题（上游仓库没配好或不可达） | 报给 PEP 管理员，重试无用 |
 | `invalid_scope` / 400 | 这个环境的客户端登记与 CLI 版本不匹配 | 报给 PEP 管理员 |
 | `skills add` 回 400 | 地址不被接受（不是平台那台 GitLab、或不是 https、或路径不全） | 核对地址；重试无用 |
 | `skills add` 回 404 | 那个仓或分支取不到，或平台看不到它 | 核对地址与分支名；找 PEP 管理员确认平台有没有读权限 |

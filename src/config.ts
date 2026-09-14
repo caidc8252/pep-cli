@@ -7,6 +7,7 @@ import type {
   SkillsState,
   SkillsStateStore,
   SkillsStateV1,
+  SkillsStateV2,
 } from "./types.js";
 
 /**
@@ -244,29 +245,30 @@ export function fileConfigStore(path = configPath()): ConfigStore {
   };
 }
 
-/** v2 的账。`packages` 的值只判形状，不判里面的名字 —— 名字归 PEP 的目录管。 */
+/** 最新（v3）的账。`packages` 的值只判形状，不判里面的名字 —— 名字归调用方给的地址管。 */
 function isSkillsState(value: unknown): value is SkillsState {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.version !== 3) return false;
+  if (typeof candidate.directory !== "string") return false;
+  if (candidate.linkedInto !== undefined && typeof candidate.linkedInto !== "string") return false;
+  return isPackageMap(candidate.packages, (skills) => isStringMap(skills));
+}
+
+/** v2：同样的外壳，但包里的 `skills` 是名字数组。 */
+function isSkillsStateV2(value: unknown): value is SkillsStateV2 {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Record<string, unknown>;
   if (candidate.version !== 2) return false;
   if (typeof candidate.directory !== "string") return false;
   if (candidate.linkedInto !== undefined && typeof candidate.linkedInto !== "string") return false;
-  const packages = candidate.packages;
-  // ⚠ `Array.isArray` 那一半不能省：数组在 JS 里也是 object，漏判的话 `packages: []` 会被
-  // 当成合法的账收下，之后 `state.packages[name]` 拿到的是下标而不是包名。
-  if (typeof packages !== "object" || packages === null || Array.isArray(packages)) return false;
-  return Object.values(packages as Record<string, unknown>).every((one) => {
-    if (typeof one !== "object" || one === null) return false;
-    const pkg = one as Record<string, unknown>;
-    return (
-      Array.isArray(pkg.skills) &&
-      pkg.skills.every((n) => typeof n === "string") &&
-      (pkg.commit === undefined || typeof pkg.commit === "string")
-    );
-  });
+  return isPackageMap(
+    candidate.packages,
+    (skills) => Array.isArray(skills) && skills.every((one) => typeof one === "string"),
+  );
 }
 
-/** v1 的账（2026-09-14 之前）。只用来认出它、好迁移，不再写回这个形状。 */
+/** v1：扁的一层，没有包的概念。 */
 function isSkillsStateV1(value: unknown): value is SkillsStateV1 {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Record<string, unknown>;
@@ -281,23 +283,62 @@ function isSkillsStateV1(value: unknown): value is SkillsStateV1 {
 }
 
 /**
- * v1 → v2。
+ * `packages` 的公共形状判定。
  *
- * ⚠ 那一串 skill 名必须归到 `LEGACY_PACKAGE` 名下，**不能丢**：它记的是「哪些目录是我们
- * 铺的」，也就是「哪些允许被删」。丢了的话，用户已装的 skill 会永远留在磁盘上没人清 ——
- * 上游删掉一个 skill，本地那份会一直在。
+ * ⚠ `Array.isArray` 那一半不能省：数组在 JS 里也是 object，漏了的话 `packages: []` 会被
+ * 当成合法的账收下，之后 `state.packages[source]` 拿到的是下标而不是地址。
  */
-export function migrateSkillsState(old: SkillsStateV1): SkillsState {
-  return {
-    version: 2,
+function isPackageMap(value: unknown, skillsOk: (skills: unknown) => boolean): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).every((one) => {
+    if (typeof one !== "object" || one === null || Array.isArray(one)) return false;
+    const pkg = one as Record<string, unknown>;
+    return skillsOk(pkg.skills) && (pkg.commit === undefined || typeof pkg.commit === "string");
+  });
+}
+
+function isStringMap(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).every((one) => typeof one === "string");
+}
+
+/**
+ * 旧账 → v3。
+ *
+ * ⚠ 那些 skill 名必须**一个不丢**：它们记的是「哪些目录是我们铺的」，也就是「哪些允许被
+ * 删」。丢了的话，上游删掉一个 skill，本地那份会永远留着没人清。
+ *
+ * ⚠ 哈希填空串，而不是编一个 —— 空串在 `update` 里一律当作「变了」。把「不知道」说成
+ * 「没变」会让迁移后的第一次 update 漏掉真正的更新。
+ */
+export function migrateSkillsState(old: SkillsStateV1 | SkillsStateV2): SkillsState {
+  const base = {
+    version: 3 as const,
     directory: old.directory,
     ...(old.linkedInto !== undefined ? { linkedInto: old.linkedInto } : {}),
-    packages: {
-      [LEGACY_PACKAGE]: {
-        ...(old.commit !== undefined ? { commit: old.commit } : {}),
-        skills: old.skills,
+  };
+  const unknownHashes = (names: string[]): Record<string, string> =>
+    Object.fromEntries(names.map((name) => [name, ""]));
+
+  if (old.version === 1) {
+    return {
+      ...base,
+      packages: {
+        [LEGACY_PACKAGE]: {
+          ...(old.commit !== undefined ? { commit: old.commit } : {}),
+          skills: unknownHashes(old.skills),
+        },
       },
-    },
+    };
+  }
+  return {
+    ...base,
+    packages: Object.fromEntries(
+      Object.entries(old.packages).map(([source, pkg]) => [
+        source,
+        { ...(pkg.commit !== undefined ? { commit: pkg.commit } : {}), skills: unknownHashes(pkg.skills) },
+      ]),
+    ),
   };
 }
 
@@ -309,8 +350,8 @@ export function fileSkillsStateStore(path = skillsStatePath()): SkillsStateStore
         // 账坏了不该让同步停摆 —— 当成「没同步过」重来一遍即可，代价只是多写一次盘。
         // 这跟 config 不同：那个坏了就登不上，必须让人看见。
         if (isSkillsState(parsed)) return parsed;
-        // v1 的账迁过来 —— 直接当「没同步过」会让用户已装的 skill 永远没人清理。
-        if (isSkillsStateV1(parsed)) return migrateSkillsState(parsed);
+        // 旧账迁过来 —— 直接当「没装过」会让用户已装的 skill 永远没人清理。
+        if (isSkillsStateV2(parsed) || isSkillsStateV1(parsed)) return migrateSkillsState(parsed);
         return null;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;

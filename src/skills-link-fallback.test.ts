@@ -25,7 +25,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   };
 });
 
-const { syncSkills } = await import("./skills-service.js");
+const { updateSkills } = await import("./skills-service.js");
 
 const ROOT = "agent-skills-main-0123456789abcdef0123456789abcdef01234567";
 const encoder = new TextEncoder();
@@ -69,7 +69,7 @@ describe("链接建不成时降级成复制", () => {
     const directory = await mkdtemp(join(tmpdir(), "pep-canon-"));
     const linkInto = await mkdtemp(join(tmpdir(), "pep-link-"));
 
-    const result = await syncSkills({
+    const result = await updateSkills({
       issuer: "https://pep.example.com",
       accessToken: "tok",
     source: "group/sub/repo",

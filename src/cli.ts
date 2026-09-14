@@ -18,7 +18,7 @@ import { createOAuthClient } from "./oauth-client.js";
 import { fetchDocContent, fetchDocsIndex } from "./docs-service.js";
 import { USERNAME_VAR, PASSWORD_VAR } from "./maven-env.js";
 import { setupNexusCredential } from "./nexus-service.js";
-import { installedPackages, syncSkills, type SkillsSyncResult } from "./skills-service.js";
+import { installedPackages, updateSkills, type SkillsUpdateResult } from "./skills-service.js";
 import type { CliConfig, ConfigStore } from "./types.js";
 
 const VERSION = "0.3.0";
@@ -33,7 +33,7 @@ Usage:
   pep auth logout
   pep skills list
   pep skills add <repo-url | group/project[@ref]> [--dir <path>]
-  pep skills sync [--dir <path>]
+  pep skills update [<repo>...] [--dir <path>]
   pep docs list [--docs-url <url>]
   pep docs get <path> [--docs-url <url>]
   pep nexus setup
@@ -55,10 +55,11 @@ as the path with the host left off:
 
 Anything on another host is refused. PEP fetches it with its own read-only service account, so no
 GitLab credential ever reaches this machine. \`pep skills list\` shows what you have added and
-\`pep skills sync\` refreshes all of it. One repository may hold more than one skill — every
-directory containing a SKILL.md becomes one, wherever it sits.
+\`pep skills update\` refreshes it — all of it, or just the repositories you name. One repository
+may hold more than one skill: every directory containing a SKILL.md becomes one, wherever it sits,
+and update reports which of them actually changed rather than just that the repository moved.
 
-\`pep skills sync\` fetches the latest skills from PEP and writes them to the shared agent
+\`pep skills update\` fetches the latest skills from PEP and writes them to the shared agent
 directory (${defaultSkillsDirectory()}), which Codex, Cursor, Amp and ~20 other agents read
 directly. Claude Code keeps its own directory, so each skill is also linked into
 ${claudeSkillsDirectory()} — one copy on disk, updated in one place. Where links are not
@@ -83,16 +84,23 @@ The password is shown by PEP once and never stored, so a second run reports 409 
 handing it out again.`;
 }
 
-/** 一次同步的汇报。`add` 与 `sync` 共用 —— 两者的产出形状本来就一样。 */
-function reportSync(result: SkillsSyncResult): void {
+/** 一次更新的汇报。`add` 与 `update` 共用 —— 两者的产出形状本来就一样。 */
+function reportUpdate(result: SkillsUpdateResult): void {
   if (result.status === "unchanged") {
     console.log(`${result.name}: already at ${result.commit}. Nothing to do.`);
     return;
   }
+  // ⚠ 先说**哪些 skill 真的变了** —— 那是用户来看这行输出的原因。仓库动了别处
+  // （README / evals）时 commit 会变而 skill 不变，只报「写了 N 个文件」说不出这个差别。
   console.log(
-    `${result.name}: wrote ${result.fileCount} file(s) across ${result.skills.length} skill(s) to ${result.directory}`,
+    result.updated.length > 0
+      ? `${result.name}: updated ${result.updated.join(" ")}`
+      : `${result.name}: no skill changed (the repository moved, but not these)`,
   );
-  if (result.skills.length > 0) console.log(`  skills: ${result.skills.join(" ")}`);
+  if (result.unchanged.length > 0) {
+    console.log(`  unchanged: ${result.unchanged.join(" ")}`);
+  }
+  console.log(`  ${result.fileCount} file(s) in ${result.directory}`);
   if (result.linkedInto !== undefined) {
     // 两行分开说：一行是「22 家共读的那份」，一行是「额外接给 Claude Code 的那条」。
     // 合成一句的话，用户看不出哪个是实体、哪个是链接，也就看不出该去哪儿改。
@@ -273,11 +281,14 @@ export async function main(): Promise<void> {
   }
 
   if (group === "skills") {
-    if (command !== "sync" && command !== "add" && command !== "list") {
+    if (command !== "update" && command !== "add" && command !== "list") {
       throw new Error(`Unknown skills command.\n\n${usage()}`);
     }
     // `add` 的位置参数在选项摘掉之前取 —— 它紧跟命令，不会跟 `--dir` 的值混。
+    // `add` 收恰好一个；`update` 收零个或多个（零个 = 全部已装的）。
     const requested = command === "add" ? args.shift() : undefined;
+    const named = command === "update" ? args.filter((one) => !one.startsWith("--")) : [];
+    for (const one of named) args.splice(args.indexOf(one), 1);
     if (command === "add" && !requested) {
       throw new Error("pep skills add needs a repository: a full https URL, or <group>/<project>.");
     }
@@ -303,28 +314,37 @@ export async function main(): Promise<void> {
         return;
       }
       for (const one of installed) console.log(one);
-      console.error("\n`pep skills sync` refreshes all of them.");
+      console.error("\n`pep skills update` refreshes all of them.");
       return;
     }
 
     const stateStore = fileSkillsStateStore();
+    const installed = await installedPackages(stateStore);
     const targets =
-      command === "add" ? [requested as string] : await installedPackages(stateStore);
+      command === "add" ? [requested as string] : named.length > 0 ? named : installed;
     if (targets.length === 0) {
-      // `sync` 而账上一个都没有：不猜一个默认值去装，那会替用户做决定。
+      // `update` 而账上一个都没有：不猜一个默认值去装，那会替用户做决定。
       console.error("Nothing added yet. Run `pep skills add <repo>`.");
       return;
     }
+    // ⚠ 点名了一个没装过的：**说出来**，不要默默把它当成一次新安装 —— `update` 与 `add`
+    // 是两件事，混起来会让一次手误变成一次静默安装。
+    const unknown = named.filter((one) => !installed.includes(one));
+    if (unknown.length > 0) {
+      throw new Error(
+        `Not added yet: ${unknown.join(" ")}. Run \`pep skills add <repo>\` first, or \`pep skills list\` to see what is.`,
+      );
+    }
 
     for (const source of targets) {
-      const result = await syncSkills({
+      const result = await updateSkills({
         ...remote,
         source,
         directory,
         ...(explicitDirectory === undefined ? { linkInto: claudeSkillsDirectory() } : {}),
         stateStore,
       });
-      reportSync(result);
+      reportUpdate(result);
     }
     return;
   }

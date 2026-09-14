@@ -1,6 +1,7 @@
 import { cp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { platform } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
+import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import { readTar, type TarEntry } from "./tar.js";
 import type { SkillsStateStore } from "./types.js";
@@ -13,11 +14,16 @@ const SKILL_MANIFEST = "SKILL.md";
 /** 摊平后的一个文件：属于哪个 skill、在它目录里的相对路径。 */
 export type SkillFile = { skill: string; path: string; data: Uint8Array };
 
-export type SkillsSyncResult =
+export type SkillsUpdateResult =
+  /** 仓库提交没变，连包都没下 —— 体在读完之前就掐了。 */
   | { status: "unchanged"; name: string; commit: string }
   | {
       status: "written";
       name: string;
+      /** 内容真的变了的那些（含新增）。**这才是用户要看的**。 */
+      updated: string[];
+      /** 取下来了但内容与上次一字不差的那些 —— 仓里动了别处（README / evals）时就是这一档。 */
+      unchanged: string[];
       commit?: string;
       skills: string[];
       fileCount: number;
@@ -108,7 +114,7 @@ function segmentsOf(path: string): string[] {
   return segments;
 }
 
-export type SkillsSyncDependencies = {
+export type SkillsUpdateDependencies = {
   issuer: string;
   accessToken: string;
   /**
@@ -216,15 +222,42 @@ async function linkSkill(
 }
 
 /**
+ * 一个 skill 目录的内容哈希。
+ *
+ * ⚠ **路径和内容都要进去**，且路径先排序：只哈希内容的话，改个文件名看起来就没变；
+ * 不排序的话，归档顺序一抖动哈希就变，于是每次都报「更新了」。
+ *
+ * 用 sha256 的前 16 字节转 hex —— 够分辨，账文件也不至于被哈希撑大。
+ */
+function hashSkill(files: readonly SkillFile[]): string {
+  const hash = createHash("sha256");
+  for (const file of [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
+    hash.update(file.path);
+    hash.update("\0");
+    hash.update(file.data);
+    hash.update("\0");
+  }
+  return hash.digest("hex").slice(0, 32);
+}
+
+/**
  * 取最新一版 skills 并铺到本地目录。
  *
  * ⚠ **只动自己写过的东西**。目标目录里可能有用户自己放的 skill —— 整个目录清空重来会把它们
  * 一起删掉。所以：要写的那几个各自先删再写（保证上游删掉的文件本地也消失），上一次写过、
  * 这次不在清单里的才移除，其余一概不碰。「上一次写过谁」记在 `skills.json` 里。
+ *
+ * ── 为什么写了还要分 updated / unchanged（2026-09-14）──────────────────────────
+ * 判「变没变」只能靠仓库 commit 的话，仓里改一行 README、动一下 `evals/`，commit 就变了，
+ * 于是**每个 skill 都被报成「更新了」**。用户真正想知道的是「我关心的那个变了没有」。
+ * 所以逐个 skill 比内容哈希，输出分两档。做法参照 `npx skills` 的 `.skill-lock.json`。
+ *
+ * ⚠ 哈希只用来**汇报**，不用来决定写不写：commit 变了就整包重写。省那几次写盘换来的是
+ * 「本地被人手改过却报 unchanged」这种查不出的状态 —— 不值。
  */
-export async function syncSkills(
-  dependencies: SkillsSyncDependencies,
-): Promise<SkillsSyncResult> {
+export async function updateSkills(
+  dependencies: SkillsUpdateDependencies,
+): Promise<SkillsUpdateResult> {
   const doFetch = dependencies.fetch ?? globalThis.fetch;
   const name = dependencies.source;
   const url = new URL(`${dependencies.issuer.replace(/\/+$/, "")}${ARCHIVE_PATH}`);
@@ -253,21 +286,34 @@ export async function syncSkills(
 
   const gzipped = new Uint8Array(await response.arrayBuffer());
   const files = planSkillFiles(readTar(gunzipSync(gzipped)));
-  const skills = [...new Set(files.map((file) => file.skill))].sort();
+
+  const bySkill = new Map<string, SkillFile[]>();
+  for (const file of files) {
+    const group = bySkill.get(file.skill);
+    if (group) group.push(file);
+    else bySkill.set(file.skill, [file]);
+  }
+  const skills = [...bySkill.keys()].sort();
+
+  // 逐个比哈希。⚠ 上次记的是空串（从旧版账迁过来、哈希未知）时一律算「变了」——
+  // 把「不知道」说成「没变」会让迁移后的第一次 update 漏掉真正的更新。
+  const hashes: Record<string, string> = {};
+  const updated: string[] = [];
+  const unchanged: string[] = [];
+  for (const skill of skills) {
+    const hash = hashSkill(bySkill.get(skill) as SkillFile[]);
+    hashes[skill] = hash;
+    const before = previous?.skills[skill];
+    if (before !== undefined && before !== "" && before === hash) unchanged.push(skill);
+    else updated.push(skill);
+  }
 
   // 先删后写：上游删掉的文件，本地跟着消失。范围严格限定在这次要写的这几个 skill 目录。
   for (const skill of skills) {
-    await rm(join(dependencies.directory, skill), {
-      recursive: true,
-      force: true,
-    });
+    await rm(join(dependencies.directory, skill), { recursive: true, force: true });
   }
   for (const file of files) {
-    const target = join(
-      dependencies.directory,
-      file.skill,
-      ...file.path.split("/"),
-    );
+    const target = join(dependencies.directory, file.skill, ...file.path.split("/"));
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, file.data);
   }
@@ -287,7 +333,7 @@ export async function syncSkills(
   // 上次这个包写过、这次没有了的，移除。**只移除记在这个包账上的** —— 用户自己放的、
   // 以及别的包铺的，都不归它管。canonical 与链接两处都要清：只清一边会留下一条指向空处的
   // 死链（或一份永不更新的副本）。
-  const removed = (previous?.skills ?? []).filter((skill) => !skills.includes(skill));
+  const removed = Object.keys(previous?.skills ?? {}).filter((skill) => !skills.includes(skill));
   for (const skill of removed) {
     await rm(join(state?.directory ?? dependencies.directory, skill), {
       recursive: true,
@@ -299,19 +345,21 @@ export async function syncSkills(
   }
 
   await dependencies.stateStore.write({
-    version: 2,
+    version: 3,
     directory: dependencies.directory,
     ...(dependencies.linkInto !== undefined ? { linkedInto: dependencies.linkInto } : {}),
     packages: {
       // 别的包的账原样留着 —— 装 B 不该把 A 的记录抹掉，那会让 A 铺的目录从此没人清理。
       ...(state?.packages ?? {}),
-      [name]: { ...(commit ? { commit } : {}), skills },
+      [name]: { ...(commit ? { commit } : {}), skills: hashes },
     },
   });
 
   return {
     status: "written",
     name,
+    updated,
+    unchanged,
     skills,
     fileCount: files.length,
     removed,
@@ -322,7 +370,7 @@ export async function syncSkills(
   };
 }
 
-/** 账上记着装过哪些包 —— `sync` 靠它知道该刷新谁。 */
+/** 账上记着装过哪些包 —— `update` 不给参数时靠它知道该刷新谁。 */
 export async function installedPackages(store: SkillsStateStore): Promise<string[]> {
   const state = await store.read();
   return Object.keys(state?.packages ?? {}).sort();

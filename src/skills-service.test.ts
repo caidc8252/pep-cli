@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { planSkillFiles, syncSkills } from "./skills-service.js";
+import { planSkillFiles, updateSkills } from "./skills-service.js";
 import type { SkillsState, SkillsStateStore } from "./types.js";
 import type { TarEntry } from "./tar.js";
 
@@ -86,7 +86,7 @@ const deps = (fetchImpl: unknown, stateStore: SkillsStateStore) => ({
   fetch: fetchImpl as typeof globalThis.fetch,
 });
 
-describe("syncSkills —— 失败的归因", () => {
+describe("updateSkills —— 失败的归因", () => {
   it.each([
     [401, /pep auth login/],
     // ⚠ 403 必须指向**客户端的 allowed_scopes**，不是 DEFAULT_SCOPES —— 后者是 CLI 曾经
@@ -100,12 +100,12 @@ describe("syncSkills —— 失败的归因", () => {
   ])("%i ⇒ 说清楚下一步该做什么", async (status, expected) => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response("", { status }));
     await expect(
-      syncSkills(deps(fetchImpl, memoryStateStore())),
+      updateSkills(deps(fetchImpl, memoryStateStore())),
     ).rejects.toThrow(expected);
   });
 });
 
-describe("syncSkills —— 落盘", () => {
+describe("updateSkills —— 落盘", () => {
   it("按 skill 铺开，目录自己建", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(
       archiveResponse({
@@ -116,7 +116,7 @@ describe("syncSkills —— 落盘", () => {
     );
     const store = memoryStateStore();
 
-    const result = await syncSkills(deps(fetchImpl, store));
+    const result = await updateSkills(deps(fetchImpl, store));
 
     expect(result).toMatchObject({
       status: "written",
@@ -132,15 +132,20 @@ describe("syncSkills —— 落盘", () => {
     expect(await readFile(join(directory, "b", "SKILL.md"), "utf8")).toBe(
       "# b",
     );
-    expect(store.current).toMatchObject({
-      version: 2,
-      packages: { "group/sub/repo": { commit: COMMIT, skills: ["a", "b"] } },
-    });
+    const pkg = store.current?.packages["group/sub/repo"];
+    expect(store.current?.version).toBe(3);
+    expect(pkg?.commit).toBe(COMMIT);
+    // 哈希是内容算出来的，不钉具体值 —— 钉的是「每个 skill 都记了一个非空哈希」，
+    // 因为空串在 update 里当作「不知道」，账里留空等于下次一定误报「变了」。
+    expect(Object.keys(pkg?.skills ?? {}).sort()).toEqual(["a", "b"]);
+    for (const hash of Object.values(pkg?.skills ?? {})) expect(hash).toMatch(/^[0-9a-f]{32}$/);
+    // 内容不同的两个 skill 不该算出同一个哈希。
+    expect(pkg?.skills.a).not.toBe(pkg?.skills.b);
   });
 
   it("带上 Bearer 打 /api/skills/archive", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(archiveResponse({}));
-    await syncSkills(deps(fetchImpl, memoryStateStore()));
+    await updateSkills(deps(fetchImpl, memoryStateStore()));
     const [url, init] = fetchImpl.mock.calls[0] as [URL, RequestInit];
     expect(url.origin + url.pathname).toBe("https://pep.example.com/api/skills/archive");
     // ⚠ 原样带出去，不做规范化 —— 账上的键就是用户敲的那一串。
@@ -155,12 +160,12 @@ describe("syncSkills —— 落盘", () => {
         archiveResponse({ [`${ROOT}/skills/a/SKILL.md`]: "# a" }),
       );
     const store = memoryStateStore({
-      version: 2,
+      version: 3,
       directory,
-      packages: { "group/sub/repo": { commit: COMMIT, skills: ["a"] } },
+      packages: { "group/sub/repo": { commit: COMMIT, skills: { "a": "h" } } },
     });
 
-    expect(await syncSkills(deps(fetchImpl, store))).toEqual({
+    expect(await updateSkills(deps(fetchImpl, store))).toEqual({
       status: "unchanged",
       name: "group/sub/repo",
       commit: COMMIT,
@@ -175,12 +180,12 @@ describe("syncSkills —— 落盘", () => {
         archiveResponse({ [`${ROOT}/skills/a/SKILL.md`]: "# a" }),
       );
     const store = memoryStateStore({
-      version: 2,
+      version: 3,
       directory: "/somewhere/else",
-      packages: { "group/sub/repo": { commit: COMMIT, skills: ["a"] } },
+      packages: { "group/sub/repo": { commit: COMMIT, skills: { "a": "h" } } },
     });
 
-    expect((await syncSkills(deps(fetchImpl, store))).status).toBe("written");
+    expect((await updateSkills(deps(fetchImpl, store))).status).toBe("written");
   });
 
   it("服务端没给提交号 ⇒ 照写，账上不记 commit", async () => {
@@ -191,7 +196,7 @@ describe("syncSkills —— 落盘", () => {
       );
     const store = memoryStateStore();
 
-    const result = await syncSkills(deps(fetchImpl, store));
+    const result = await updateSkills(deps(fetchImpl, store));
     expect(result).toMatchObject({ status: "written" });
     expect(result).not.toHaveProperty("commit");
     expect(store.current?.packages["group/sub/repo"]?.commit).toBeUndefined();
@@ -206,13 +211,13 @@ describe("syncSkills —— 落盘", () => {
         archiveResponse({ [`${ROOT}/skills/a/SKILL.md`]: "# a" }),
       );
 
-    await syncSkills(
+    await updateSkills(
       deps(
         fetchImpl,
         memoryStateStore({
-          version: 2,
+          version: 3,
           directory,
-          packages: { "group/sub/repo": { skills: ["a"] } },
+          packages: { "group/sub/repo": { skills: { "a": "h" } } },
         }),
       ),
     );
@@ -229,13 +234,13 @@ describe("syncSkills —— 落盘", () => {
         archiveResponse({ [`${ROOT}/skills/a/SKILL.md`]: "# a" }),
       );
 
-    const result = await syncSkills(
+    const result = await updateSkills(
       deps(
         fetchImpl,
         memoryStateStore({
-          version: 2,
+          version: 3,
           directory,
-          packages: { "group/sub/repo": { skills: ["a", "gone"] } },
+          packages: { "group/sub/repo": { skills: { "a": "h", "gone": "h" } } },
         }),
       ),
     );
@@ -255,7 +260,7 @@ describe("syncSkills —— 落盘", () => {
         archiveResponse({ [`${ROOT}/skills/a/SKILL.md`]: "# a" }),
       );
 
-    await syncSkills(deps(fetchImpl, memoryStateStore()));
+    await updateSkills(deps(fetchImpl, memoryStateStore()));
 
     expect((await readdir(directory)).sort()).toEqual(["a", "mine"]);
     expect(await readFile(join(directory, "mine", "SKILL.md"), "utf8")).toBe(
@@ -269,7 +274,7 @@ describe("syncSkills —— 落盘", () => {
 // canonical 写进 `~/.agents/skills` —— 那是 22 家 agent 共读的通用目录；只有 Claude Code 坚持
 // 自己的 `~/.claude/skills`，所以额外接一条链给它。这样一次同步覆盖 23 家，而要维护的常量只有
 // 两个路径 —— 替代方案是维护一张「每家 agent 的目录」表（上游 skills 包里那张有 79 项）。
-describe("syncSkills —— 接进 agent 目录", () => {
+describe("updateSkills —— 接进 agent 目录", () => {
   let linkInto: string;
 
   beforeEach(async () => {
@@ -280,7 +285,7 @@ describe("syncSkills —— 接进 agent 目录", () => {
     const fetchImpl = vi.fn().mockResolvedValue(
       archiveResponse({ [`${ROOT}/skills/coding/SKILL.md`]: "# coding" }),
     );
-    const result = await syncSkills({
+    const result = await updateSkills({
       ...deps(fetchImpl, memoryStateStore()),
       linkInto,
     });
@@ -301,7 +306,7 @@ describe("syncSkills —— 接进 agent 目录", () => {
     const fetchImpl = vi.fn().mockResolvedValue(
       archiveResponse({ [`${ROOT}/skills/coding/SKILL.md`]: "# coding" }),
     );
-    const result = await syncSkills(deps(fetchImpl, memoryStateStore()));
+    const result = await updateSkills(deps(fetchImpl, memoryStateStore()));
 
     expect(result).toMatchObject({ status: "written" });
     expect("linkedInto" in result).toBe(false);
@@ -310,7 +315,7 @@ describe("syncSkills —— 接进 agent 目录", () => {
 
   it("上游删掉的 skill，canonical 与链接**两处都清** —— 只清一边会留下死链", async () => {
     const store = memoryStateStore();
-    await syncSkills({
+    await updateSkills({
       ...deps(
         vi.fn().mockResolvedValue(
           archiveResponse(
@@ -327,7 +332,7 @@ describe("syncSkills —— 接进 agent 目录", () => {
     });
     expect(await readdir(linkInto)).toEqual(["coding", "retired"]);
 
-    await syncSkills({
+    await updateSkills({
       ...deps(
         vi.fn().mockResolvedValue(
           archiveResponse(
@@ -353,7 +358,7 @@ describe("syncSkills —— 接进 agent 目录", () => {
     const viaSymlink = join(await mkdtemp(join(tmpdir(), "pep-via-")), "claude");
     await symlink(physical, viaSymlink);
 
-    await syncSkills({
+    await updateSkills({
       ...deps(
         vi.fn().mockResolvedValue(
           archiveResponse({ [`${ROOT}/skills/coding/SKILL.md`]: "# coding" }),
@@ -377,7 +382,7 @@ describe("syncSkills —— 接进 agent 目录", () => {
     await mkdir(join(linkInto, "coding"), { recursive: true });
     await writeFile(join(linkInto, "coding", "STALE.md"), "旧的");
 
-    await syncSkills({
+    await updateSkills({
       ...deps(
         vi.fn().mockResolvedValue(
           archiveResponse({ [`${ROOT}/skills/coding/SKILL.md`]: "# coding" }),
@@ -391,3 +396,77 @@ describe("syncSkills —— 接进 agent 目录", () => {
   });
 });
 
+// ═══ updated / unchanged 分档（2026-09-14）═══════════════════════════════════
+//
+// ⚠ 这一组是本次改动的核心。只比仓库 commit 的话，仓里改一行 README、动一下 `evals/`，
+// commit 就变了，于是**每个 skill 都被报成「更新了」** —— 而用户来看这行输出，要的恰恰是
+// 「我关心的那个变了没有」。
+describe("updateSkills —— 哪些 skill 真的变了", () => {
+  const archive = (a: string, b: string) =>
+    archiveResponse({
+      [`${ROOT}/a/SKILL.md`]: a,
+      [`${ROOT}/b/SKILL.md`]: b,
+    });
+
+  it("内容没变的进 unchanged，变了的进 updated", async () => {
+    const store = memoryStateStore();
+    const first = vi.fn().mockResolvedValue(archive("# a", "# b"));
+    await updateSkills(deps(first, store));
+
+    // 仓库动了（commit 变了），但只有 b 的内容变了。
+    const second = vi.fn().mockResolvedValue(archiveResponse(
+      { [`${ROOT}/a/SKILL.md`]: "# a", [`${ROOT}/b/SKILL.md`]: "# b changed" },
+      "1111111111111111111111111111111111111111",
+    ));
+    const result = await updateSkills(deps(second, store));
+
+    expect(result).toMatchObject({ status: "written", updated: ["b"], unchanged: ["a"] });
+  });
+
+  it("第一次装 ⇒ 全部算 updated（此前没有任何哈希可比）", async () => {
+    const result = await updateSkills(
+      deps(vi.fn().mockResolvedValue(archive("# a", "# b")), memoryStateStore()),
+    );
+    expect(result).toMatchObject({ updated: ["a", "b"], unchanged: [] });
+  });
+
+  // ⚠ 从旧版账迁过来的哈希是空串 = 「不知道」。把「不知道」说成「没变」会让迁移后的第一次
+  // update 漏掉真正的更新，所以那一档必须算 updated。
+  it("账上哈希是空串（旧版迁来的）⇒ 算 updated，不算 unchanged", async () => {
+    const store = memoryStateStore({
+      version: 3,
+      directory,
+      packages: { "group/sub/repo": { commit: "old", skills: { a: "", b: "" } } },
+    });
+    const result = await updateSkills(
+      deps(vi.fn().mockResolvedValue(archive("# a", "# b")), store),
+    );
+    expect(result).toMatchObject({ updated: ["a", "b"], unchanged: [] });
+  });
+
+  // ⚠ 哈希要把**路径**也算进去：只哈希内容的话，改个文件名看起来就没变。
+  it("只改文件名也算变了", async () => {
+    const store = memoryStateStore();
+    await updateSkills(
+      deps(
+        vi.fn().mockResolvedValue(
+          archiveResponse({ [`${ROOT}/a/SKILL.md`]: "# a", [`${ROOT}/a/one.md`]: "x" }),
+        ),
+        store,
+      ),
+    );
+    // 内容一字未改，只把 one.md 改名成 two.md。
+    const result = await updateSkills(
+      deps(
+        vi.fn().mockResolvedValue(
+          archiveResponse(
+            { [`${ROOT}/a/SKILL.md`]: "# a", [`${ROOT}/a/two.md`]: "x" },
+            "2222222222222222222222222222222222222222",
+          ),
+        ),
+        store,
+      ),
+    );
+    expect(result).toMatchObject({ updated: ["a"] });
+  });
+});
