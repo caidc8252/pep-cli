@@ -65,6 +65,25 @@ export function planSkillFiles(entries: readonly TarEntry[]): SkillFile[] {
     roots.push(root);
   }
 
+  // ⚠ **同名必须抛，不能让后写的盖掉先写的。** skill 名就是目录名，而落盘是
+  // `<canonical>/<skill 名>/...` —— 两个不同位置的 `docs/SKILL.md` 会挤进同一个目录，
+  // 表现是「装上了，但内容是两个 skill 混起来的、且每次同步取决于归档顺序」。那是静默的，
+  // 而这条链路上游是我们自己的 PEP + 自己的 GitLab：重名是上游写错了，该在那边改，
+  // 不该由这里挑一个赢家。与 tar-slip 同一口径 —— 不是常规情况，是**信号**。
+  const seen = new Map<string, string>();
+  for (const root of roots) {
+    const name = root[root.length - 1];
+    const where = root.join("/");
+    const first = seen.get(name);
+    if (first !== undefined) {
+      throw new Error(
+        `Two skills in this package would both be called "${name}": ${first} and ${where}. ` +
+          `Skill names come from the directory name, so they must be unique within a package.`,
+      );
+    }
+    seen.set(name, where);
+  }
+
   const files: SkillFile[] = [];
   for (const entry of entries) {
     const segments = segmentsOf(entry.path);

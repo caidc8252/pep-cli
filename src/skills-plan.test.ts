@@ -74,4 +74,28 @@ describe("靠 SKILL.md 定位", () => {
   it("条目想跳出目标目录 ⇒ 抛，不是跳过", () => {
     expect(() => planSkillFiles([at("a/../../.ssh/authorized_keys")])).toThrow(/escapes/);
   });
+
+  // ⚠ skill 名就是目录名，落盘是 `<canonical>/<skill 名>/...` —— 两个不同位置的
+  // `docs/SKILL.md` 会挤进同一个目录，后写的盖掉先写的，而且哪个赢取决于归档顺序。
+  // 那是静默的，所以抛而不是挑一个赢家：重名是**上游**写错了，该在那边改。
+  it("不同位置的同名目录 ⇒ 抛，并把两处都念出来", () => {
+    expect(() =>
+      planSkillFiles([
+        at("alpha/docs/SKILL.md"),
+        at("alpha/docs/ref.md"),
+        at("beta/docs/SKILL.md"),
+      ]),
+    ).toThrow(/both be called "docs".*alpha\/docs.*beta\/docs/s);
+  });
+
+  it("同一个目录只算一次，不会自己跟自己撞", () => {
+    expect(grouped([at("a/SKILL.md"), at("a/b.md"), at("a/c/d.md")])).toEqual({
+      a: ["SKILL.md", "b.md", "c/d.md"],
+    });
+  });
+
+  // 嵌套的那一档不是重名 —— `a` 与 `a/b` 的目录名不同，各算各的。
+  it("嵌套但不同名 ⇒ 照常各算各的，不误报重名", () => {
+    expect(Object.keys(grouped([at("a/SKILL.md"), at("a/b/SKILL.md")])).sort()).toEqual(["a", "b"]);
+  });
 });
