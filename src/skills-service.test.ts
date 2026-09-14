@@ -80,6 +80,7 @@ beforeEach(async () => {
 const deps = (fetchImpl: unknown, stateStore: SkillsStateStore) => ({
   issuer: "https://pep.example.com",
   accessToken: "tok",
+  source: "group/sub/repo",
   directory,
   stateStore,
   fetch: fetchImpl as typeof globalThis.fetch,
@@ -92,7 +93,8 @@ describe("syncSkills —— 失败的归因", () => {
     // 不申请这个 scope 时的说法，留着会把人指去改一个已经对了的地方。
     [403, /allowed_scopes in PEP/],
     // ⚠ 404 要有自己的一句：最常见的成因是端点还没部署，兜底的「answered 404」说不出这件事。
-    [404, /does not serve skills/],
+    [400, /not accepted|https URL/],
+    [404, /No such repository or ref/],
     [503, /could not reach the skills repository/],
     [500, /answered 500/],
   ])("%i ⇒ 说清楚下一步该做什么", async (status, expected) => {
@@ -132,7 +134,7 @@ describe("syncSkills —— 落盘", () => {
     );
     expect(store.current).toMatchObject({
       version: 2,
-      packages: { "semi-integration": { commit: COMMIT, skills: ["a", "b"] } },
+      packages: { "group/sub/repo": { commit: COMMIT, skills: ["a", "b"] } },
     });
   });
 
@@ -141,8 +143,8 @@ describe("syncSkills —— 落盘", () => {
     await syncSkills(deps(fetchImpl, memoryStateStore()));
     const [url, init] = fetchImpl.mock.calls[0] as [URL, RequestInit];
     expect(url.origin + url.pathname).toBe("https://pep.example.com/api/skills/archive");
-    // ⚠ 省略 name 时也显式带上 —— 服务端那条兼容位迟早要撤，带着就不依赖它。
-    expect(url.searchParams.get("name")).toBe("semi-integration");
+    // ⚠ 原样带出去，不做规范化 —— 账上的键就是用户敲的那一串。
+    expect(url.searchParams.get("source")).toBe("group/sub/repo");
     expect(init).toEqual({ headers: { Authorization: "Bearer tok" } });
   });
 
@@ -155,12 +157,12 @@ describe("syncSkills —— 落盘", () => {
     const store = memoryStateStore({
       version: 2,
       directory,
-      packages: { "semi-integration": { commit: COMMIT, skills: ["a"] } },
+      packages: { "group/sub/repo": { commit: COMMIT, skills: ["a"] } },
     });
 
     expect(await syncSkills(deps(fetchImpl, store))).toEqual({
       status: "unchanged",
-      name: "semi-integration",
+      name: "group/sub/repo",
       commit: COMMIT,
     });
     expect(await readdir(directory)).toEqual([]);
@@ -175,7 +177,7 @@ describe("syncSkills —— 落盘", () => {
     const store = memoryStateStore({
       version: 2,
       directory: "/somewhere/else",
-      packages: { "semi-integration": { commit: COMMIT, skills: ["a"] } },
+      packages: { "group/sub/repo": { commit: COMMIT, skills: ["a"] } },
     });
 
     expect((await syncSkills(deps(fetchImpl, store))).status).toBe("written");
@@ -192,7 +194,7 @@ describe("syncSkills —— 落盘", () => {
     const result = await syncSkills(deps(fetchImpl, store));
     expect(result).toMatchObject({ status: "written" });
     expect(result).not.toHaveProperty("commit");
-    expect(store.current?.packages["semi-integration"]?.commit).toBeUndefined();
+    expect(store.current?.packages["group/sub/repo"]?.commit).toBeUndefined();
   });
 
   it("上游删掉的文件，本地跟着消失（先删后写）", async () => {
@@ -210,7 +212,7 @@ describe("syncSkills —— 落盘", () => {
         memoryStateStore({
           version: 2,
           directory,
-          packages: { "semi-integration": { skills: ["a"] } },
+          packages: { "group/sub/repo": { skills: ["a"] } },
         }),
       ),
     );
@@ -233,7 +235,7 @@ describe("syncSkills —— 落盘", () => {
         memoryStateStore({
           version: 2,
           directory,
-          packages: { "semi-integration": { skills: ["a", "gone"] } },
+          packages: { "group/sub/repo": { skills: ["a", "gone"] } },
         }),
       ),
     );

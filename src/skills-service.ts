@@ -3,11 +3,9 @@ import { platform } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { readTar, type TarEntry } from "./tar.js";
-import { LEGACY_PACKAGE } from "./config.js";
 import type { SkillsStateStore } from "./types.js";
 
 const ARCHIVE_PATH = "/api/skills/archive";
-const LIST_PATH = "/api/skills";
 
 /** 认一个 skill 的凭据。**目录里有这个文件就是一个 skill，没有就不是** —— 见 `planSkillFiles`。 */
 const SKILL_MANIFEST = "SKILL.md";
@@ -114,10 +112,11 @@ export type SkillsSyncDependencies = {
   issuer: string;
   accessToken: string;
   /**
-   * 要哪个包（PEP 目录里的名字）。**省略 = 那条兼容位** —— 服务端会给存量默认的那一条。
-   * ⚠ 账上的键用的是解析后的名字，所以省略时这里要落成 `LEGACY_PACKAGE`，两边必须一致。
+   * 要哪个仓：完整 URL，或省略主机的 `群/子群/仓[@ref]`。**必填。**
+   * ⚠ 它同时是账上的键 —— 用**调用方原样给的那一串**，不做规范化：规范化之后
+   * `a/b` 与 `https://host/a/b` 会归成一条账，而用户看到的 `list` 是他自己敲过的那一串。
    */
-  name?: string;
+  source: string;
   /** canonical 落点。默认 `~/.agents/skills`（22 家 agent 共读的通用目录）。 */
   directory: string;
   /**
@@ -140,11 +139,14 @@ function describeFailure(status: number): string {
     // 指错方向（去改一个已经对了的地方）。
     return "This access token carries no `skills:read` scope. Ask an operator to add it to this client's allowed_scopes in PEP, then run `pep auth login` again — existing tokens do not gain new scopes.";
   }
+  if (status === 400)
+    return "PEP did not accept that repository address. It must be an https URL on the platform's GitLab host, or a <group>/<project> path on it.";
   if (status === 404) {
-    // ⚠ 单独一句，不能落到兜底的 `PEP answered 404.`。那句话意思没错，但它不会告诉你
-    // 「这个部署压根没有这个端点」—— 而那正是最常见的 404 成因（端点还没部署上去）。
-    // 说不清的话，使用者只会以为 CLI 坏了，然后开始重试。
-    return "This PEP deployment does not serve skills — it has no /api/skills/archive endpoint. Ask an operator whether skills are enabled here.";
+    // ⚠ 404 有两个完全不同的成因，而 CLI 分不开它们：
+    //   · 那个仓 / 分支取不到（PEP 答的，带 31005）；
+    //   · 这个部署压根没有这个端点（框架答的，没有本仓错误码）。
+    // 所以措辞把两种都摆出来 —— 替它猜一个的代价是把人指去错的方向。
+    return "No such repository or ref on the platform's GitLab (or this PEP deployment has no /api/skills/archive endpoint at all). Check the address, then ask an operator whether skills are enabled here.";
   }
   if (status === 503) {
     return "PEP could not reach the skills repository. Retry shortly, or ask an operator whether this deployment serves skills.";
@@ -224,10 +226,9 @@ export async function syncSkills(
   dependencies: SkillsSyncDependencies,
 ): Promise<SkillsSyncResult> {
   const doFetch = dependencies.fetch ?? globalThis.fetch;
-  const name = dependencies.name ?? LEGACY_PACKAGE;
+  const name = dependencies.source;
   const url = new URL(`${dependencies.issuer.replace(/\/+$/, "")}${ARCHIVE_PATH}`);
-  // 省略 name 时也显式带上：服务端那条兼容位迟早要撤，带着就不依赖它。
-  url.searchParams.set("name", name);
+  url.searchParams.set("source", name);
   const response = await doFetch(url, {
     headers: { Authorization: `Bearer ${dependencies.accessToken}` },
   });
@@ -319,34 +320,6 @@ export async function syncSkills(
     ...(copiedCount > 0 ? { copiedCount } : {}),
     ...(commit ? { commit } : {}),
   };
-}
-
-/** PEP 目录里的一条。 */
-export type SkillListing = { name: string; description: string };
-
-/** `GET /api/skills` —— 这个部署下发哪些包。 */
-export async function fetchSkillsCatalog(dependencies: {
-  issuer: string;
-  accessToken: string;
-  fetch?: typeof globalThis.fetch;
-}): Promise<SkillListing[]> {
-  const doFetch = dependencies.fetch ?? globalThis.fetch;
-  const response = await doFetch(`${dependencies.issuer.replace(/\/+$/, "")}${LIST_PATH}`, {
-    headers: { Authorization: `Bearer ${dependencies.accessToken}`, Accept: "application/json" },
-  });
-  if (!response.ok) {
-    await response.body?.cancel();
-    throw new Error(describeFailure(response.status));
-  }
-  const body = (await response.json()) as { data?: { skills?: unknown } };
-  const skills = body.data?.skills;
-  if (!Array.isArray(skills)) throw new Error("PEP returned a malformed skills catalog.");
-  return skills.flatMap((one) => {
-    const row = one as { name?: unknown; description?: unknown };
-    return typeof row.name === "string"
-      ? [{ name: row.name, description: typeof row.description === "string" ? row.description : "" }]
-      : [];
-  });
 }
 
 /** 账上记着装过哪些包 —— `sync` 靠它知道该刷新谁。 */

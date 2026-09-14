@@ -72,6 +72,7 @@ describe("链接建不成时降级成复制", () => {
     const result = await syncSkills({
       issuer: "https://pep.example.com",
       accessToken: "tok",
+    source: "group/sub/repo",
       directory,
       linkInto,
       stateStore: { read: async () => null, write: async () => {} },

@@ -18,12 +18,7 @@ import { createOAuthClient } from "./oauth-client.js";
 import { fetchDocContent, fetchDocsIndex } from "./docs-service.js";
 import { USERNAME_VAR, PASSWORD_VAR } from "./maven-env.js";
 import { setupNexusCredential } from "./nexus-service.js";
-import {
-  fetchSkillsCatalog,
-  installedPackages,
-  syncSkills,
-  type SkillsSyncResult,
-} from "./skills-service.js";
+import { installedPackages, syncSkills, type SkillsSyncResult } from "./skills-service.js";
 import type { CliConfig, ConfigStore } from "./types.js";
 
 const VERSION = "0.3.0";
@@ -37,7 +32,7 @@ Usage:
   pep auth token
   pep auth logout
   pep skills list
-  pep skills add <name> [--dir <path>]
+  pep skills add <repo-url | group/project[@ref]> [--dir <path>]
   pep skills sync [--dir <path>]
   pep docs list [--docs-url <url>]
   pep docs get <path> [--docs-url <url>]
@@ -50,10 +45,18 @@ one. It defaults to the docs platform — a token minted without it is rejected 
 resource server, and their answer looks exactly like "this token does not exist".
 Use \`pep auth token\` when another agent needs a fresh bearer token.
 
-\`pep skills list\` shows which skill packages this PEP deployment offers; \`pep skills add <name>\`
-installs one of them and \`pep skills sync\` refreshes everything you have already added. A package
-may contain more than one skill — every directory holding a SKILL.md becomes one, wherever it sits
-in the repository.
+\`pep skills add\` takes a repository on the platform's own GitLab, either as a full https URL or
+as the path with the host left off:
+
+  pep skills add https://git.example.com/group/sub/project
+  pep skills add https://git.example.com/group/sub/project/-/tree/some-branch
+  pep skills add group/sub/project
+  pep skills add group/sub/project@some-branch
+
+Anything on another host is refused. PEP fetches it with its own read-only service account, so no
+GitLab credential ever reaches this machine. \`pep skills list\` shows what you have added and
+\`pep skills sync\` refreshes all of it. One repository may hold more than one skill — every
+directory containing a SKILL.md becomes one, wherever it sits.
 
 \`pep skills sync\` fetches the latest skills from PEP and writes them to the shared agent
 directory (${defaultSkillsDirectory()}), which Codex, Cursor, Amp and ~20 other agents read
@@ -275,7 +278,9 @@ export async function main(): Promise<void> {
     }
     // `add` 的位置参数在选项摘掉之前取 —— 它紧跟命令，不会跟 `--dir` 的值混。
     const requested = command === "add" ? args.shift() : undefined;
-    if (command === "add" && !requested) throw new Error("pep skills add needs a package name.");
+    if (command === "add" && !requested) {
+      throw new Error("pep skills add needs a repository: a full https URL, or <group>/<project>.");
+    }
 
     // 显式 `--dir` = 「就铺到这儿，别的什么都别做」—— 给那些不读通用目录的 agent 用的逃生口，
     // 所以那一档不接任何链接（接了反而会往用户没要求的地方写）。
@@ -289,22 +294,16 @@ export async function main(): Promise<void> {
     const remote = { issuer: authorization.issuer, accessToken: authorization.accessToken };
 
     if (command === "list") {
-      const catalog = await fetchSkillsCatalog(remote);
-      if (catalog.length === 0) {
-        // 空清单不是故障，是这个部署的答案 —— 说清楚，免得对接方去查网络。
-        console.error("This PEP deployment offers no skill packages.");
+      // ⚠ 列的是**你装过什么**，不是「平台提供什么」—— 后者已经没有出处了：仓由调用方
+      // 指定，PEP 只判主机，不再维护一张下发目录。硬编一个「推荐清单」等于把那张表挪个
+      // 地方，而它迟早与现实分叉。
+      const installed = await installedPackages(fileSkillsStateStore());
+      if (installed.length === 0) {
+        console.error("Nothing added yet. Run `pep skills add <repo>`.");
         return;
       }
-      const installed = new Set(await installedPackages(fileSkillsStateStore()));
-      for (const one of catalog) {
-        // 装过的标一下 —— 否则用户看不出 `add` 过哪个，而那正是决定下一步的信息。
-        console.log(
-          [installed.has(one.name) ? "*" : " ", one.name, one.description]
-            .filter(Boolean)
-            .join("\t"),
-        );
-      }
-      console.error("\n* = already added; `pep skills sync` refreshes those.");
+      for (const one of installed) console.log(one);
+      console.error("\n`pep skills sync` refreshes all of them.");
       return;
     }
 
@@ -313,14 +312,14 @@ export async function main(): Promise<void> {
       command === "add" ? [requested as string] : await installedPackages(stateStore);
     if (targets.length === 0) {
       // `sync` 而账上一个都没有：不猜一个默认值去装，那会替用户做决定。
-      console.error("Nothing added yet. Run `pep skills list`, then `pep skills add <name>`.");
+      console.error("Nothing added yet. Run `pep skills add <repo>`.");
       return;
     }
 
-    for (const name of targets) {
+    for (const source of targets) {
       const result = await syncSkills({
         ...remote,
-        name,
+        source,
         directory,
         ...(explicitDirectory === undefined ? { linkInto: claudeSkillsDirectory() } : {}),
         stateStore,
