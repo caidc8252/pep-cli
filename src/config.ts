@@ -1,7 +1,14 @@
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { CliConfig, ConfigStore, SkillsState, SkillsStateStore } from "./types.js";
+import type {
+  CliConfig,
+  ConfigStore,
+  SkillsState,
+  SkillsStateStore,
+  SkillsStateV1,
+  SkillsStateV2,
+} from "./types.js";
 
 /**
  * CLI 的 client_id。**一个名字，所有环境通用** —— 与 issuer 不同，它不按构建环境分叉。
@@ -89,6 +96,14 @@ export const DEFAULT_RESOURCES = ["urn:newland:pep:docs"] as const;
  * 2026-09-09 实测该地址活着：`/llms.txt` 回 200 `text/plain`，无 Bearer 时 **0 字节**
  * —— 0 字节不是坏了，是 `AUTH_GUARD_ENABLED=true` 下匿名身份的角色为空集，索引因此为空。
  */
+/**
+ * v1 的账迁过来时，那一串 skill 归到哪个包名下。
+ *
+ * ⚠ 它必须与 PEP 目录里**存量 CLI 默认拿到的那一条**同名（服务端的 `LEGACY_DEFAULT_SKILL`），
+ * 否则迁移之后第一次 `sync` 会认为「那个包没装过」，于是把它重新铺一遍、而旧目录没人清。
+ */
+export const LEGACY_PACKAGE = "semi-integration";
+
 export const DEFAULT_DOCS_URL = "https://pep-developer-docs.onrender.com";
 
 export type BuildEnvironment = "development" | "view" | "production";
@@ -230,7 +245,31 @@ export function fileConfigStore(path = configPath()): ConfigStore {
   };
 }
 
+/** 最新（v3）的账。`packages` 的值只判形状，不判里面的名字 —— 名字归调用方给的地址管。 */
 function isSkillsState(value: unknown): value is SkillsState {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.version !== 3) return false;
+  if (typeof candidate.directory !== "string") return false;
+  if (candidate.linkedInto !== undefined && typeof candidate.linkedInto !== "string") return false;
+  return isPackageMap(candidate.packages, (skills) => isStringMap(skills));
+}
+
+/** v2：同样的外壳，但包里的 `skills` 是名字数组。 */
+function isSkillsStateV2(value: unknown): value is SkillsStateV2 {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.version !== 2) return false;
+  if (typeof candidate.directory !== "string") return false;
+  if (candidate.linkedInto !== undefined && typeof candidate.linkedInto !== "string") return false;
+  return isPackageMap(
+    candidate.packages,
+    (skills) => Array.isArray(skills) && skills.every((one) => typeof one === "string"),
+  );
+}
+
+/** v1：扁的一层，没有包的概念。 */
+function isSkillsStateV1(value: unknown): value is SkillsStateV1 {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Record<string, unknown>;
   return (
@@ -239,9 +278,68 @@ function isSkillsState(value: unknown): value is SkillsState {
     Array.isArray(candidate.skills) &&
     candidate.skills.every((one) => typeof one === "string") &&
     (candidate.commit === undefined || typeof candidate.commit === "string") &&
-    // 可选：0.1.1 及更早写下的 skills.json 没有这个键，读它们不该报「状态损坏」。
     (candidate.linkedInto === undefined || typeof candidate.linkedInto === "string")
   );
+}
+
+/**
+ * `packages` 的公共形状判定。
+ *
+ * ⚠ `Array.isArray` 那一半不能省：数组在 JS 里也是 object，漏了的话 `packages: []` 会被
+ * 当成合法的账收下，之后 `state.packages[source]` 拿到的是下标而不是地址。
+ */
+function isPackageMap(value: unknown, skillsOk: (skills: unknown) => boolean): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).every((one) => {
+    if (typeof one !== "object" || one === null || Array.isArray(one)) return false;
+    const pkg = one as Record<string, unknown>;
+    return skillsOk(pkg.skills) && (pkg.commit === undefined || typeof pkg.commit === "string");
+  });
+}
+
+function isStringMap(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).every((one) => typeof one === "string");
+}
+
+/**
+ * 旧账 → v3。
+ *
+ * ⚠ 那些 skill 名必须**一个不丢**：它们记的是「哪些目录是我们铺的」，也就是「哪些允许被
+ * 删」。丢了的话，上游删掉一个 skill，本地那份会永远留着没人清。
+ *
+ * ⚠ 哈希填空串，而不是编一个 —— 空串在 `update` 里一律当作「变了」。把「不知道」说成
+ * 「没变」会让迁移后的第一次 update 漏掉真正的更新。
+ */
+export function migrateSkillsState(old: SkillsStateV1 | SkillsStateV2): SkillsState {
+  const base = {
+    version: 3 as const,
+    directory: old.directory,
+    ...(old.linkedInto !== undefined ? { linkedInto: old.linkedInto } : {}),
+  };
+  const unknownHashes = (names: string[]): Record<string, string> =>
+    Object.fromEntries(names.map((name) => [name, ""]));
+
+  if (old.version === 1) {
+    return {
+      ...base,
+      packages: {
+        [LEGACY_PACKAGE]: {
+          ...(old.commit !== undefined ? { commit: old.commit } : {}),
+          skills: unknownHashes(old.skills),
+        },
+      },
+    };
+  }
+  return {
+    ...base,
+    packages: Object.fromEntries(
+      Object.entries(old.packages).map(([source, pkg]) => [
+        source,
+        { ...(pkg.commit !== undefined ? { commit: pkg.commit } : {}), skills: unknownHashes(pkg.skills) },
+      ]),
+    ),
+  };
 }
 
 export function fileSkillsStateStore(path = skillsStatePath()): SkillsStateStore {
@@ -251,7 +349,10 @@ export function fileSkillsStateStore(path = skillsStatePath()): SkillsStateStore
         const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
         // 账坏了不该让同步停摆 —— 当成「没同步过」重来一遍即可，代价只是多写一次盘。
         // 这跟 config 不同：那个坏了就登不上，必须让人看见。
-        return isSkillsState(parsed) ? parsed : null;
+        if (isSkillsState(parsed)) return parsed;
+        // 旧账迁过来 —— 直接当「没装过」会让用户已装的 skill 永远没人清理。
+        if (isSkillsStateV2(parsed) || isSkillsStateV1(parsed)) return migrateSkillsState(parsed);
+        return null;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
         if (error instanceof SyntaxError) return null;

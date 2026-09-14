@@ -8,7 +8,7 @@ description: Newland（新大陆）支付终端与 PEP 开发者平台的接入�
 PEP 的开发者文档与接入指南**不公开**，要凭 PEP 账号读取。`pep-cli` 是那把钥匙：它换取一枚
 访问令牌，然后用它取文档、并把平台维护的其余 skills 同步下来。
 
-**本 skill 只做引导。** 真正的接入指南是 `pep skills sync` 同步下来的那些——它们由平台维护、
+**本 skill 只做引导。** 真正的接入指南是 `pep skills add` 装下来的那些——它们由平台维护、
 随时更新。本文件刻意不复制它们的内容：复制一份就会过期，而过期的接入指南比没有更糟。
 
 ## 第 0 步 · 先看现在是什么状态
@@ -32,7 +32,7 @@ pep auth status
 
 - 只是**读文档 / 查接口怎么用** → 做完第 0（必要时 1、2）步就去 `pep docs list`，
   **第 3 步可以跳过**。
-- 要**接入 SDK、写代码** → 第 3 步必须做，真正的接入指南在那里面。
+- 要**接入 SDK、写代码** → 第 3 步必须做，真正的接入指南在那里面（需要管理员给你仓库地址）。
 - 要**拉 Maven 包**（`mvn install` 报 401 / 找不到 Newland 的依赖）→ 还要做第 4 步。
 
 ## 第 1 步 · 装
@@ -70,16 +70,44 @@ pep auth login --issuer https://pep-webapp-view.onrender.com
 
 用户说登完之后，再跑一次第 0 步那条 `pep auth status` 确认，然后继续。
 
-## 第 3 步 · 同步平台下发的 skills
+## 第 3 步 · 装接入指南 skill
 
 ```bash
-pep skills sync
+pep skills add <仓库地址>
 ```
 
-它把平台维护的接入指南写进 Claude Code 找 skill 的目录（`~/.claude/skills`，`--dir` 可改）。
+仓库地址两种写法都行：
+
+```bash
+pep skills add https://git.newlandpayment.com/群/子群/仓
+pep skills add 群/子群/仓                    # 省掉主机
+pep skills add 群/子群/仓@分支名              # 指定分支（skill 在未合并分支上时要用）
+```
+
+⚠ **地址要向 PEP 管理员要**，本 skill 刻意不写死一个 —— 写死一份就会过期，而过期的地址
+比没有更糟。
+
+装完之后：
+
+```bash
+pep skills list             # 你装过哪些
+pep skills update           # 刷新全部已装的
+pep skills update <仓库地址> # 只刷新指定的那些
+```
+
+⚠ `update` 会分别说**哪些 skill 真的变了**、哪些没变。仓里改了 README 或 `evals/` 这类
+与 skill 无关的东西时，它会如实说「仓库动了，但这些 skill 没变」——不要把那读成出错。
+
+它把接入指南写进 Claude Code 找 skill 的目录（`~/.claude/skills`，`--dir` 可改）。
 只动它自己写过的那些，用户手放进去的文件不碰。
 
-**同步完要主动去读那些文件**：新写入的 skill 不一定当场被会话发现。直接读
+⚠ **一个仓可能含不止一个 skill**：仓里每个直接含 `SKILL.md` 的目录都会成为一个，不管它在
+第几层。所以 `add` 一次可能装出好几个 —— 命令会把名字列出来。
+
+⚠ **只接受平台自己那台 GitLab 上的地址**，别的主机一律拒。GitLab 凭据全程在服务端，
+不会落到用户机器上 —— 所以用户不需要有那台 GitLab 的账号。
+
+**装完要主动去读那些文件**：新写入的 skill 不一定当场被会话发现。直接读
 `~/.claude/skills/<名字>/SKILL.md`，不要等它自动出现。
 
 ## 第 4 步 · 配 Maven 仓库凭据（**只有 Android** 要拉包才做）
@@ -149,8 +177,10 @@ curl 或别的 HTTP 客户端要直接打 PEP 接口时用它。**不要把令�
 | `2D002` / "This application is not authorized to sign you in." | 这个环境上没有 CLI 用的那枚客户端；或本地存着 0.1.1 之前版本留下的旧 client_id | 先确认装的是最新版（`pep --version` ≥ 0.1.1）；仍旧报错就 `pep auth logout` 再重登 |
 | `docs list` 是空的 | 登录成功了，但这个账号没被授予任何文档 | 找 PEP 管理员开权限，不是 CLI 的问题 |
 | `docs get` 回 403 | 有账号但没这一篇的权限 | 同上 |
-| `skills sync` 回 503 | **平台侧**的问题（上游仓库没配好或不可达） | 报给 PEP 管理员，重试无用 |
+| `skills add` / `update` 回 503 | **平台侧**的问题（上游仓库没配好或不可达） | 报给 PEP 管理员，重试无用 |
 | `invalid_scope` / 400 | 这个环境的客户端登记与 CLI 版本不匹配 | 报给 PEP 管理员 |
+| `skills add` 回 400 | 地址不被接受（不是平台那台 GitLab、或不是 https、或路径不全） | 核对地址；重试无用 |
+| `skills add` 回 404 | 那个仓或分支取不到，或平台看不到它 | 核对地址与分支名；找 PEP 管理员确认平台有没有读权限 |
 | `nexus setup` 回 409 | **不是错误**：这家公司已经开过凭据了 | 用之前存下的那份；丢了找 PEP 管理员在 Nexus 上重置 |
 | `nexus setup` 回 503 | 平台侧没配好 Nexus 或上游不可达 | 报给 PEP 管理员，重试无用 |
 | 跑完了但 Gradle 仍 401 | 环境变量只对**新** shell 生效 | 开个新终端，或 `eval "$(pep nexus setup)"` |

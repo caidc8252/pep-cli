@@ -1,21 +1,29 @@
 import { cp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { platform } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
+import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import { readTar, type TarEntry } from "./tar.js";
-import type { SkillsState, SkillsStateStore } from "./types.js";
+import type { SkillsStateStore } from "./types.js";
 
 const ARCHIVE_PATH = "/api/skills/archive";
-/** 归档里 skill 所在的子目录。PEP 已经按它收窄过，这里再剥一次是为了不依赖那个约定。 */
-const SKILLS_SEGMENT = "skills";
+
+/** 认一个 skill 的凭据。**目录里有这个文件就是一个 skill，没有就不是** —— 见 `planSkillFiles`。 */
+const SKILL_MANIFEST = "SKILL.md";
 
 /** 摊平后的一个文件：属于哪个 skill、在它目录里的相对路径。 */
 export type SkillFile = { skill: string; path: string; data: Uint8Array };
 
-export type SkillsSyncResult =
-  | { status: "unchanged"; commit: string }
+export type SkillsUpdateResult =
+  /** 仓库提交没变，连包都没下 —— 体在读完之前就掐了。 */
+  | { status: "unchanged"; name: string; commit: string }
   | {
       status: "written";
+      name: string;
+      /** 内容真的变了的那些（含新增）。**这才是用户要看的**。 */
+      updated: string[];
+      /** 取下来了但内容与上次一字不差的那些 —— 仓里动了别处（README / evals）时就是这一档。 */
+      unchanged: string[];
       commit?: string;
       skills: string[];
       fileCount: number;
@@ -30,42 +38,91 @@ export type SkillsSyncResult =
 /**
  * 归档条目 → 「哪个 skill 的哪个文件」。纯函数。
  *
- * 要剥两层：
- *   1. 归档根 `<项目>-<ref>-<sha>/` —— 每次都不一样（带 sha），留着的话每同步一次就多一个目录。
- *   2. `skills/` —— PEP 传了 `?path=skills`，GitLab 会把它保留在路径里。
- *      判断「在不在」而不是硬剥，这样上游哪天改了打包范围，这里不会静默把 skill 名字当成它。
+ * ── 靠找 `SKILL.md` 定位，不按层级猜（2026-09-14 改）────────────────────────────
+ * 规则一句话：**凡是直接含 `SKILL.md` 的目录，就是一个 skill**，它自己的名字就是 skill 名，
+ * 它底下的一切原样跟着走。仓里其余东西（`evals/`、`README.md`、CI 配置）没有 `SKILL.md`，
+ * 自然落不进来。
+ *
+ * ⚠ 此前是「剥掉归档根，再剥掉一段字面量 `skills`，剩下第一段当 skill 名」。那套要求上游
+ * 仓长成 `skills/<名字>/SKILL.md`，于是 PEP 那侧不得不加一个 `path` 去收窄归档 —— 而那个
+ * 参数有**两种互相矛盾的语义**（填 `skills` 时它指容器，填别的时它指 skill 自己），指错一层
+ * 是**静默**失败：同步报成功、文件全部深一层、agent 找不到 `SKILL.md`。现在两边都不需要了：
+ * PEP 整仓取、这里自己找。
+ *
+ * ⚠ **只认直接子级的 `SKILL.md`**：`a/SKILL.md` 让 `a` 成为 skill，而 `a/b/SKILL.md` 让 `b`
+ * 成为 skill。两者同时存在时各算各的，互不吞并 —— 嵌套是上游的自由，不该由这里替它裁决。
  *
  * ⚠ 段级白名单挡的是 tar-slip：归档里一条 `../../.ssh/authorized_keys` 会让写盘跳出目标目录。
  * 归档来自我们自己的 PEP + 自己的 GitLab，所以这不是常规情况 —— 是**信号**，因此抛而不是跳过。
  */
 export function planSkillFiles(entries: readonly TarEntry[]): SkillFile[] {
-  const files: SkillFile[] = [];
+  // 先扫一遍，把「哪些目录是 skill」定下来 —— 一个文件属不属于某个 skill，取决于它上方有没有
+  // 一层 `SKILL.md`，而那一层可能排在它后面，所以不能边走边判。
+  const roots: string[][] = [];
   for (const entry of entries) {
-    const segments = entry.path
-      .split("/")
-      .filter((one) => one !== "" && one !== ".");
-    if (segments.some((one) => one === "..")) {
+    const segments = segmentsOf(entry.path);
+    if (segments.at(-1) !== SKILL_MANIFEST) continue;
+    const root = segments.slice(0, -1);
+    // 归档根自己带 `SKILL.md`（整个仓就是一个 skill）时没有名字可用 —— 跳过而不是拿归档根
+    // 那个带 sha 的目录名当 skill 名，那个名字每次同步都不一样。
+    if (root.length < 2) continue;
+    roots.push(root);
+  }
+
+  // ⚠ **同名必须抛，不能让后写的盖掉先写的。** skill 名就是目录名，而落盘是
+  // `<canonical>/<skill 名>/...` —— 两个不同位置的 `docs/SKILL.md` 会挤进同一个目录，
+  // 表现是「装上了，但内容是两个 skill 混起来的、且每次同步取决于归档顺序」。那是静默的，
+  // 而这条链路上游是我们自己的 PEP + 自己的 GitLab：重名是上游写错了，该在那边改，
+  // 不该由这里挑一个赢家。与 tar-slip 同一口径 —— 不是常规情况，是**信号**。
+  const seen = new Map<string, string>();
+  for (const root of roots) {
+    const name = root[root.length - 1];
+    const where = root.join("/");
+    const first = seen.get(name);
+    if (first !== undefined) {
       throw new Error(
-        `Refusing an archive entry that escapes its directory: ${entry.path}`,
+        `Two skills in this package would both be called "${name}": ${first} and ${where}. ` +
+          `Skill names come from the directory name, so they must be unique within a package.`,
       );
     }
-    const withoutRoot = segments.slice(1);
-    const relative =
-      withoutRoot[0] === SKILLS_SEGMENT ? withoutRoot.slice(1) : withoutRoot;
-    // 少于两段 = 不在任何 skill 目录里（归档根下的散文件），不属于同步范围。
-    if (relative.length < 2) continue;
+    seen.set(name, where);
+  }
+
+  const files: SkillFile[] = [];
+  for (const entry of entries) {
+    const segments = segmentsOf(entry.path);
+    // 最深的那个 root 优先：`a/b/SKILL.md` 存在时，`a/b/x` 归 `b` 而不是归 `a`。
+    const root = roots
+      .filter((r) => r.length < segments.length && r.every((seg, i) => segments[i] === seg))
+      .sort((x, y) => y.length - x.length)[0];
+    if (!root) continue;
     files.push({
-      skill: relative[0],
-      path: relative.slice(1).join("/"),
+      skill: root[root.length - 1],
+      path: segments.slice(root.length).join("/"),
       data: entry.data,
     });
   }
   return files;
 }
 
-export type SkillsSyncDependencies = {
+/** 路径切段并挡掉 tar-slip。空段与 `.` 丢掉，`..` 抛。 */
+function segmentsOf(path: string): string[] {
+  const segments = path.split("/").filter((one) => one !== "" && one !== ".");
+  if (segments.some((one) => one === "..")) {
+    throw new Error(`Refusing an archive entry that escapes its directory: ${path}`);
+  }
+  return segments;
+}
+
+export type SkillsUpdateDependencies = {
   issuer: string;
   accessToken: string;
+  /**
+   * 要哪个仓：完整 URL，或省略主机的 `群/子群/仓[@ref]`。**必填。**
+   * ⚠ 它同时是账上的键 —— 用**调用方原样给的那一串**，不做规范化：规范化之后
+   * `a/b` 与 `https://host/a/b` 会归成一条账，而用户看到的 `list` 是他自己敲过的那一串。
+   */
+  source: string;
   /** canonical 落点。默认 `~/.agents/skills`（22 家 agent 共读的通用目录）。 */
   directory: string;
   /**
@@ -88,11 +145,14 @@ function describeFailure(status: number): string {
     // 指错方向（去改一个已经对了的地方）。
     return "This access token carries no `skills:read` scope. Ask an operator to add it to this client's allowed_scopes in PEP, then run `pep auth login` again — existing tokens do not gain new scopes.";
   }
+  if (status === 400)
+    return "PEP did not accept that repository address. It must be an https URL on the platform's GitLab host, or a <group>/<project> path on it.";
   if (status === 404) {
-    // ⚠ 单独一句，不能落到兜底的 `PEP answered 404.`。那句话意思没错，但它不会告诉你
-    // 「这个部署压根没有这个端点」—— 而那正是最常见的 404 成因（端点还没部署上去）。
-    // 说不清的话，使用者只会以为 CLI 坏了，然后开始重试。
-    return "This PEP deployment does not serve skills — it has no /api/skills/archive endpoint. Ask an operator whether skills are enabled here.";
+    // ⚠ 404 有两个完全不同的成因，而 CLI 分不开它们：
+    //   · 那个仓 / 分支取不到（PEP 答的，带 31005）；
+    //   · 这个部署压根没有这个端点（框架答的，没有本仓错误码）。
+    // 所以措辞把两种都摆出来 —— 替它猜一个的代价是把人指去错的方向。
+    return "No such repository or ref on the platform's GitLab (or this PEP deployment has no /api/skills/archive endpoint at all). Check the address, then ask an operator whether skills are enabled here.";
   }
   if (status === 503) {
     return "PEP could not reach the skills repository. Retry shortly, or ask an operator whether this deployment serves skills.";
@@ -162,17 +222,47 @@ async function linkSkill(
 }
 
 /**
+ * 一个 skill 目录的内容哈希。
+ *
+ * ⚠ **路径和内容都要进去**，且路径先排序：只哈希内容的话，改个文件名看起来就没变；
+ * 不排序的话，归档顺序一抖动哈希就变，于是每次都报「更新了」。
+ *
+ * 用 sha256 的前 16 字节转 hex —— 够分辨，账文件也不至于被哈希撑大。
+ */
+function hashSkill(files: readonly SkillFile[]): string {
+  const hash = createHash("sha256");
+  for (const file of [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
+    hash.update(file.path);
+    hash.update("\0");
+    hash.update(file.data);
+    hash.update("\0");
+  }
+  return hash.digest("hex").slice(0, 32);
+}
+
+/**
  * 取最新一版 skills 并铺到本地目录。
  *
  * ⚠ **只动自己写过的东西**。目标目录里可能有用户自己放的 skill —— 整个目录清空重来会把它们
  * 一起删掉。所以：要写的那几个各自先删再写（保证上游删掉的文件本地也消失），上一次写过、
  * 这次不在清单里的才移除，其余一概不碰。「上一次写过谁」记在 `skills.json` 里。
+ *
+ * ── 为什么写了还要分 updated / unchanged（2026-09-14）──────────────────────────
+ * 判「变没变」只能靠仓库 commit 的话，仓里改一行 README、动一下 `evals/`，commit 就变了，
+ * 于是**每个 skill 都被报成「更新了」**。用户真正想知道的是「我关心的那个变了没有」。
+ * 所以逐个 skill 比内容哈希，输出分两档。做法参照 `npx skills` 的 `.skill-lock.json`。
+ *
+ * ⚠ 哈希只用来**汇报**，不用来决定写不写：commit 变了就整包重写。省那几次写盘换来的是
+ * 「本地被人手改过却报 unchanged」这种查不出的状态 —— 不值。
  */
-export async function syncSkills(
-  dependencies: SkillsSyncDependencies,
-): Promise<SkillsSyncResult> {
+export async function updateSkills(
+  dependencies: SkillsUpdateDependencies,
+): Promise<SkillsUpdateResult> {
   const doFetch = dependencies.fetch ?? globalThis.fetch;
-  const response = await doFetch(`${dependencies.issuer}${ARCHIVE_PATH}`, {
+  const name = dependencies.source;
+  const url = new URL(`${dependencies.issuer.replace(/\/+$/, "")}${ARCHIVE_PATH}`);
+  url.searchParams.set("source", name);
+  const response = await doFetch(url, {
     headers: { Authorization: `Bearer ${dependencies.accessToken}` },
   });
   if (!response.ok) {
@@ -181,35 +271,49 @@ export async function syncSkills(
   }
 
   const commit = response.headers.get("x-skills-commit") ?? undefined;
-  const previous = await dependencies.stateStore.read();
+  const state = await dependencies.stateStore.read();
+  const previous = state?.packages[name];
   if (
     commit !== undefined &&
     commit === previous?.commit &&
-    previous.directory === dependencies.directory
+    state?.directory === dependencies.directory
   ) {
     // 已经是这一版了。体还没读完就掐掉，省下传输 —— 这是个半吊子的省法，真要省该是
     // 条件请求（CLI 带 If-None-Match、PEP 答 304），但 PEP 那侧还没做。
     await response.body?.cancel();
-    return { status: "unchanged", commit };
+    return { status: "unchanged", name, commit };
   }
 
   const gzipped = new Uint8Array(await response.arrayBuffer());
   const files = planSkillFiles(readTar(gunzipSync(gzipped)));
-  const skills = [...new Set(files.map((file) => file.skill))].sort();
+
+  const bySkill = new Map<string, SkillFile[]>();
+  for (const file of files) {
+    const group = bySkill.get(file.skill);
+    if (group) group.push(file);
+    else bySkill.set(file.skill, [file]);
+  }
+  const skills = [...bySkill.keys()].sort();
+
+  // 逐个比哈希。⚠ 上次记的是空串（从旧版账迁过来、哈希未知）时一律算「变了」——
+  // 把「不知道」说成「没变」会让迁移后的第一次 update 漏掉真正的更新。
+  const hashes: Record<string, string> = {};
+  const updated: string[] = [];
+  const unchanged: string[] = [];
+  for (const skill of skills) {
+    const hash = hashSkill(bySkill.get(skill) as SkillFile[]);
+    hashes[skill] = hash;
+    const before = previous?.skills[skill];
+    if (before !== undefined && before !== "" && before === hash) unchanged.push(skill);
+    else updated.push(skill);
+  }
 
   // 先删后写：上游删掉的文件，本地跟着消失。范围严格限定在这次要写的这几个 skill 目录。
   for (const skill of skills) {
-    await rm(join(dependencies.directory, skill), {
-      recursive: true,
-      force: true,
-    });
+    await rm(join(dependencies.directory, skill), { recursive: true, force: true });
   }
   for (const file of files) {
-    const target = join(
-      dependencies.directory,
-      file.skill,
-      ...file.path.split("/"),
-    );
+    const target = join(dependencies.directory, file.skill, ...file.path.split("/"));
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, file.data);
   }
@@ -226,32 +330,36 @@ export async function syncSkills(
     }
   }
 
-  // 上次写过、这次没有了的，移除。**只移除记在账上的** —— 用户自己放的 skill 不归我们管。
-  // canonical 与链接两处都要清：只清一边会留下一条指向空处的死链（或一份永不更新的副本）。
-  const removed = (previous?.skills ?? []).filter(
-    (skill) => !skills.includes(skill),
-  );
+  // 上次这个包写过、这次没有了的，移除。**只移除记在这个包账上的** —— 用户自己放的、
+  // 以及别的包铺的，都不归它管。canonical 与链接两处都要清：只清一边会留下一条指向空处的
+  // 死链（或一份永不更新的副本）。
+  const removed = Object.keys(previous?.skills ?? {}).filter((skill) => !skills.includes(skill));
   for (const skill of removed) {
-    await rm(join(previous?.directory ?? dependencies.directory, skill), {
+    await rm(join(state?.directory ?? dependencies.directory, skill), {
       recursive: true,
       force: true,
     });
-    if (previous?.linkedInto !== undefined) {
-      await rm(join(previous.linkedInto, skill), { recursive: true, force: true });
+    if (state?.linkedInto !== undefined) {
+      await rm(join(state.linkedInto, skill), { recursive: true, force: true });
     }
   }
 
-  const state: SkillsState = {
-    version: 1,
-    skills,
+  await dependencies.stateStore.write({
+    version: 3,
     directory: dependencies.directory,
     ...(dependencies.linkInto !== undefined ? { linkedInto: dependencies.linkInto } : {}),
-    ...(commit ? { commit } : {}),
-  };
-  await dependencies.stateStore.write(state);
+    packages: {
+      // 别的包的账原样留着 —— 装 B 不该把 A 的记录抹掉，那会让 A 铺的目录从此没人清理。
+      ...(state?.packages ?? {}),
+      [name]: { ...(commit ? { commit } : {}), skills: hashes },
+    },
+  });
 
   return {
     status: "written",
+    name,
+    updated,
+    unchanged,
     skills,
     fileCount: files.length,
     removed,
@@ -260,4 +368,10 @@ export async function syncSkills(
     ...(copiedCount > 0 ? { copiedCount } : {}),
     ...(commit ? { commit } : {}),
   };
+}
+
+/** 账上记着装过哪些包 —— `update` 不给参数时靠它知道该刷新谁。 */
+export async function installedPackages(store: SkillsStateStore): Promise<string[]> {
+  const state = await store.read();
+  return Object.keys(state?.packages ?? {}).sort();
 }
