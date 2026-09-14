@@ -27,9 +27,7 @@
  *     `~/.bash_profile`）。那是**用户自己的文件**，所以照搬改 XML 那一套纪律：先备份、
  *     只动我们自己那一段、认不出就不写。
  *
- * 两个平台都**另外**把 export 行打到 stdout，好让当前这个 shell 立刻能用
- * （`eval "$(pep nexus setup)"`）—— 与 `pep auth token` 同一口径：给机器读的走 stdout，
- * 给人读的走 stderr。
+ * 凭据只写入本地配置，不输出到终端。配置完成后需要打开新终端。
  */
 import { readFile, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
@@ -74,18 +72,6 @@ export function resolveTarget(
 /** POSIX shell 的单引号转义：把值整个包进单引号，内部的单引号用 `'\''` 断开再接上。 */
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-/** 给 stdout 的两行 —— 要能直接被 `eval` 吃掉。 */
-export function exportLines(credential: MavenCredential, os: string = platform()): string {
-  if (os === "win32") {
-    // cmd.exe 的 `set` 不接受引号包值（引号会成为值的一部分），所以这里不加。
-    return `set ${USERNAME_VAR}=${credential.username}\nset ${PASSWORD_VAR}=${credential.password}`;
-  }
-  return [
-    `export ${USERNAME_VAR}=${shellQuote(credential.username)}`,
-    `export ${PASSWORD_VAR}=${shellQuote(credential.password)}`,
-  ].join("\n");
 }
 
 /** profile 里我们那一段的完整文本（含围栏）。 */

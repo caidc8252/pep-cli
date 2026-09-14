@@ -1,5 +1,4 @@
 import {
-  exportLines,
   persistMavenEnv,
   resolveTarget,
   type MavenCredential,
@@ -13,9 +12,6 @@ const CREDENTIAL_PATH = "/api/nexus/credential";
 export type NexusCredential = MavenCredential;
 
 export type NexusSetupResult = {
-  username: string;
-  /** 可以直接喂给 `eval` 的两行 —— 让当前这个 shell 立刻能用。 */
-  lines: string;
   /** 持久化到哪儿了、有没有落成。 */
   persisted: MavenEnvResult;
 };
@@ -98,16 +94,13 @@ export async function fetchNexusCredential(
 /**
  * 取一份凭据，落成 `NEWLAND_MAVEN_USERNAME` / `NEWLAND_MAVEN_PASSWORD` 两个环境变量。
  *
- * ⚠ **持久化失败不抛。** 凭据已经从 PEP 那里换走了，而 PEP 不存密码 —— 此时抛异常等于把它
- * 扔掉，用户只能去找运维重置。所以失败也照常返回，把 `lines` 交出去让人自己用；成败写在
- * `persisted` 里由调用方如实汇报。
+ * 只返回持久化结果，不把用户名和密码交给 CLI 输出。失败由 CLI 报错，提示联系运维重置。
  */
 export async function setupNexusCredential(
   dependencies: NexusDependencies,
 ): Promise<NexusSetupResult> {
   const credential = await fetchNexusCredential(dependencies);
   const target = dependencies.target ?? resolveTarget(dependencies.os);
-  const lines = exportLines(credential, dependencies.os);
 
   const persisted = await persistMavenEnv(credential, target, dependencies.now).catch(
     (error: unknown): MavenEnvResult => ({
@@ -117,5 +110,5 @@ export async function setupNexusCredential(
     }),
   );
 
-  return { username: credential.username, lines, persisted };
+  return { persisted };
 }

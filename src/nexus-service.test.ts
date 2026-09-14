@@ -110,38 +110,23 @@ describe("setupNexusCredential", () => {
     return path;
   }
 
-  it("写进 profile，并把两行交给调用方", async () => {
+  it("写进 profile，只返回保存结果", async () => {
     const path = await profilePath();
     const result = await setupNexusCredential({ ...base, target: { kind: "profile", path } });
 
-    expect(result.username).toBe("pep-party-42");
-    expect(result.lines).toContain("export NEWLAND_MAVEN_USERNAME='pep-party-42'");
-    expect(result.lines).toContain("export NEWLAND_MAVEN_PASSWORD='p4ss'");
+    expect(result).not.toHaveProperty("username");
+    expect(result).not.toHaveProperty("lines");
     expect(result.persisted.status).toBe("profile-appended");
-    expect(await readFile(path, "utf8")).toContain("NEWLAND_MAVEN_PASSWORD");
+    expect(await readFile(path, "utf8")).toContain("export NEWLAND_MAVEN_PASSWORD='p4ss'");
   });
 
-  it("Windows 那一档给的是 cmd 语法", async () => {
-    // 不真跑 setx，只钉行的形状 —— target 显式给 profile，避开子进程。
-    const path = await profilePath();
-    const result = await setupNexusCredential({
-      ...base,
-      os: "win32",
-      target: { kind: "profile", path },
-    });
-    expect(result.lines).toBe(
-      "set NEWLAND_MAVEN_USERNAME=pep-party-42\nset NEWLAND_MAVEN_PASSWORD=p4ss",
-    );
-  });
-
-  // ⚠ 凭据已经从 PEP 那里换走了，而 PEP 不存密码 —— 此时抛异常等于把它扔掉，
-  // 用户只能去找运维重置。所以落盘失败也必须把 `lines` 交出去。
-  it("落盘失败不抛，两行照样返回", async () => {
+  it("落盘失败返回 manual，不返回凭据", async () => {
     const path = await profilePath("# >>> pep-cli: Newland Maven credentials >>>\nexport X=1\n");
     const result = await setupNexusCredential({ ...base, target: { kind: "profile", path } });
 
     expect(result.persisted.status).toBe("manual");
-    expect(result.lines).toContain("export NEWLAND_MAVEN_PASSWORD='p4ss'");
+    expect(JSON.stringify(result)).not.toContain("p4ss");
+    expect(JSON.stringify(result)).not.toContain("pep-party-42");
   });
 
   it("PEP 拒了就不碰文件系统 —— 失败不该留下半截产物", async () => {

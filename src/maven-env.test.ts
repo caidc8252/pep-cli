@@ -1,9 +1,8 @@
 import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
-  exportLines,
   PASSWORD_VAR,
   persistMavenEnv,
   planProfile,
@@ -39,21 +38,21 @@ describe("resolveTarget", () => {
     const target = resolveTarget("darwin", "/bin/zsh");
     expect(target.kind).toBe("profile");
     if (target.kind !== "profile") throw new Error("unreachable");
-    expect(target.path.endsWith("/.zshrc")).toBe(true);
+    expect(target.path).toBe(join(homedir(), ".zshrc"));
   });
 
   // 登录 shell 读的是 .bash_profile 而不是 .bashrc —— 写错文件的表现是「配了但新开的终端没有」。
   it("macOS + bash ⇒ ~/.bash_profile", () => {
     const target = resolveTarget("darwin", "/bin/bash");
     if (target.kind !== "profile") throw new Error("unreachable");
-    expect(target.path.endsWith("/.bash_profile")).toBe(true);
+    expect(target.path).toBe(join(homedir(), ".bash_profile"));
   });
 
   it("不是 bash 的一律按 zsh 走（macOS 自 Catalina 起的默认）", () => {
     for (const shell of ["/usr/local/bin/fish", "/bin/sh", ""]) {
       const target = resolveTarget("darwin", shell);
       if (target.kind !== "profile") throw new Error("unreachable");
-      expect(target.path.endsWith("/.zshrc")).toBe(true);
+      expect(target.path).toBe(join(homedir(), ".zshrc"));
     }
   });
 
@@ -65,35 +64,19 @@ describe("resolveTarget", () => {
     try {
       const target = resolveTarget("darwin");
       if (target.kind !== "profile") throw new Error("unreachable");
-      expect(target.path.endsWith("/.zshrc")).toBe(true);
+      expect(target.path).toBe(join(homedir(), ".zshrc"));
     } finally {
       vi.unstubAllEnvs();
     }
   });
 });
 
-describe("exportLines", () => {
-  it("POSIX：export + 单引号包值，可直接 eval", () => {
-    expect(exportLines(CRED, "darwin")).toBe(
-      `export NEWLAND_MAVEN_USERNAME='pep-party-42'\nexport NEWLAND_MAVEN_PASSWORD='Xk9_qZ2mTb-4'`,
-    );
-  });
-
-  // ⚠ 密码里出现单引号时不能就这么塞进单引号串 —— 那会提前闭合，后面的内容被 shell 当成命令。
-  it("值里有单引号也不会把引号串提前闭合", () => {
-    const line = exportLines({ username: "u", password: "a'b" }, "darwin");
-    expect(line).toContain(`'a'\\''b'`);
-  });
-
-  // cmd.exe 的 set 不接受引号包值——引号会成为值的一部分，于是密码里凭空多两个字符。
-  it("Windows：用 set，且不给值加引号", () => {
-    expect(exportLines(CRED, "win32")).toBe(
-      `set NEWLAND_MAVEN_USERNAME=pep-party-42\nset NEWLAND_MAVEN_PASSWORD=Xk9_qZ2mTb-4`,
-    );
-  });
-});
-
 describe("planProfile", () => {
+  it("值里有单引号也不会把 profile 的引号串提前闭合", () => {
+    const plan = planProfile(null, { username: "u", password: "a'b" });
+    if (plan.action === "manual") throw new Error("unreachable");
+    expect(plan.content).toContain(`'a'\\''b'`);
+  });
   it("文件不存在 ⇒ 造一段", () => {
     const plan = planProfile(null, CRED);
     expect(plan.action).toBe("append");

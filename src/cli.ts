@@ -16,57 +16,12 @@ import {
 import { systemCredentialStore } from "./credential-store.js";
 import { createOAuthClient } from "./oauth-client.js";
 import { fetchDocContent, fetchDocsIndex } from "./docs-service.js";
-import { USERNAME_VAR, PASSWORD_VAR } from "./maven-env.js";
+import { usage } from "./help.js";
 import { setupNexusCredential } from "./nexus-service.js";
 import { syncSkills } from "./skills-service.js";
 import type { CliConfig, ConfigStore } from "./types.js";
 
 const VERSION = "0.2.0";
-
-function usage(): string {
-  return `PEP CLI ${VERSION}
-
-Usage:
-  pep auth login [--issuer <url>] [--client-id <id>] [--resource <uri> ...]
-  pep auth status
-  pep auth token
-  pep auth logout
-  pep skills sync [--dir <path>]
-  pep docs list [--docs-url <url>]
-  pep docs get <path> [--docs-url <url>]
-  pep nexus setup
-
-The issuer is built into this executable. --issuer overrides it for that one command and is
-NOT remembered — pass it every time you log in against a non-default deployment.
---resource names which resource server the token is for (RFC 8707); repeat it for more than
-one. It defaults to the docs platform — a token minted without it is rejected by every
-resource server, and their answer looks exactly like "this token does not exist".
-Use \`pep auth token\` when another agent needs a fresh bearer token.
-
-\`pep skills sync\` fetches the latest skills from PEP and writes them to the shared agent
-directory (${defaultSkillsDirectory()}), which Codex, Cursor, Amp and ~20 other agents read
-directly. Claude Code keeps its own directory, so each skill is also linked into
-${claudeSkillsDirectory()} — one copy on disk, updated in one place. Where links are not
-available the skill is copied instead and the run says so.
-
---dir <path> writes to that path ONLY and skips the linking, for an agent that reads neither
-directory. Either way sync only touches skills it wrote itself; anything you put there by
-hand is left alone.
-
-\`pep docs list\` prints the documents this account can read (path + description); feed a path
-straight to \`pep docs get\` to print that document as markdown on stdout. The documentation
-site is built in (${DEFAULT_DOCS_URL}); --docs-url overrides it and is then remembered.
-
-\`pep nexus setup\` asks PEP for this organisation's Maven repository credential and saves it as
-the two environment variables the Newland Android SDK reads — \`${USERNAME_VAR}\` and
-\`${PASSWORD_VAR}\` — so you do not copy anything by hand. On Windows it writes them to your user
-environment (\`setx\`); on macOS it keeps a marked block in your shell profile, backing the file up
-first and touching nothing else. Either way persistence only affects NEW shells, so the two lines
-are also printed on stdout: \`eval "$(pep nexus setup)"\` uses them in the current one.
-Only Android needs this — the Windows and iOS SDKs are cloned from Git, not pulled from Maven.
-The password is shown by PEP once and never stored, so a second run reports 409 rather than
-handing it out again.`;
-}
 
 /** 可重复的选项，按出现顺序取值。`--resource` 是唯一一个 —— RFC 8707 允许一次带多个受众。 */
 function repeatedOption(args: string[], name: string): string[] {
@@ -137,8 +92,14 @@ export async function loginConfig(
 
 export async function main(): Promise<void> {
   const args = process.argv.slice(2);
+  if (args[0] === "help") {
+    console.log(usage(VERSION, args.slice(1).filter((arg) => arg !== "--help" && arg !== "-h")));
+    return;
+  }
   if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
-    console.log(usage());
+    const path = args.filter((arg) => arg !== "--help" && arg !== "-h").slice(0, 2);
+    const flagIndex = path.findIndex((arg) => arg.startsWith("-"));
+    console.log(usage(VERSION, flagIndex === -1 ? path : path.slice(0, flagIndex)));
     return;
   }
   if (args[0] === "--version" || args[0] === "-v") {
@@ -147,8 +108,12 @@ export async function main(): Promise<void> {
   }
   const group = args.shift();
   if (group !== "auth" && group !== "skills" && group !== "docs" && group !== "nexus")
-    throw new Error(`Unknown command.\n\n${usage()}`);
+    throw new Error(`Unknown command.\n\n${usage(VERSION)}`);
   const command = args.shift();
+  if (!command) {
+    console.log(usage(VERSION, [group]));
+    return;
+  }
   const configStore = fileConfigStore(configPath());
   const auth = createAuthService({
     configStore,
@@ -158,7 +123,7 @@ export async function main(): Promise<void> {
 
   if (group === "docs") {
     if (command !== "list" && command !== "get") {
-      throw new Error(`Unknown docs command.\n\n${usage()}`);
+      throw new Error(`Unknown docs command.\n\n${usage(VERSION, ["docs"])}`);
     }
     const explicitDocsUrl = option(args, "--docs-url");
     // `get` 的位置参数在选项摘掉之后才取 —— 否则 `--docs-url` 的值会被当成路径。
@@ -196,7 +161,7 @@ export async function main(): Promise<void> {
   }
 
   if (group === "nexus") {
-    if (command !== "setup") throw new Error(`Unknown nexus command.\n\n${usage()}`);
+    if (command !== "setup") throw new Error(`Unknown nexus command.\n\n${usage(VERSION, ["nexus"])}`);
     if (args.length > 0) throw new Error(`Unknown option: ${args[0]}`);
     const authorization = await auth.currentAuthorization();
     const result = await setupNexusCredential({
@@ -204,37 +169,19 @@ export async function main(): Promise<void> {
       accessToken: authorization.accessToken,
     });
 
-    // ⚠ 两行走 **stdout**，说明全走 stderr —— 与 `pep auth token` 同一口径：给机器读的
-    // 可以直接 `eval "$(pep nexus setup)"` 让**当前**这个 shell 立刻能用，而持久化那一半
-    // 无论在哪个平台都只对**新** shell 生效。
-    console.log(result.lines);
-
     const persisted = result.persisted;
-    if (persisted.status === "windows") {
-      console.error(`Saved ${USERNAME_VAR} and ${PASSWORD_VAR} to your Windows user environment.`);
-      console.error("Existing terminals do not see them — open a new one (or use the lines above).");
-    } else if (persisted.status === "manual") {
-      // 没落盘。凭据已经换走了且 PEP 不存密码，所以上面那两行就是全部 —— 说清楚。
-      console.error(
-        `Nothing was written${persisted.path ? ` to ${persisted.path}` : ""}: ${persisted.reason}`,
+    if (persisted.status === "manual") {
+      // 底层 setx 异常可能包含带密码的命令行，不能把 reason 打到终端。
+      throw new Error(
+        "Maven credentials could not be fully saved locally. PEP does not store the password; contact an operator to reset it in Nexus and configure it locally.",
       );
-      console.error("The two lines above are the only copy — PEP does not store the password.");
-    } else {
-      console.error(
-        persisted.status === "profile-replaced"
-          ? `Replaced the pep-cli block in ${persisted.path}`
-          : `Appended a pep-cli block to ${persisted.path}`,
-      );
-      // 备份路径必须打出来 —— 改的是用户自己的 profile，出了意外要能一条命令回去。
-      if (persisted.backupPath) console.error(`Backup: ${persisted.backupPath}`);
-      console.error("New shells will have it; this one will not until you re-source the profile.");
     }
-    console.error(`Nexus user: ${result.username}`);
+    console.log("Maven credentials saved successfully. Open a new terminal to use them.");
     return;
   }
 
   if (group === "skills") {
-    if (command !== "sync") throw new Error(`Unknown skills command.\n\n${usage()}`);
+    if (command !== "sync") throw new Error(`Unknown skills command.\n\n${usage(VERSION, ["skills"])}`);
     // 显式 `--dir` = 「就铺到这儿，别的什么都别做」—— 给那些不读通用目录的 agent 用的逃生口，
     // 所以那一档不接任何链接（接了反而会往用户没要求的地方写）。
     const explicitDirectory = option(args, "--dir");
@@ -308,6 +255,6 @@ export async function main(): Promise<void> {
     console.log("Logged out. Local credentials were removed.");
     return;
   }
-  throw new Error(`Unknown auth command.\n\n${usage()}`);
+  throw new Error(`Unknown auth command.\n\n${usage(VERSION, ["auth"])}`);
 }
 

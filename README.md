@@ -54,6 +54,21 @@ and pass it with `--client-id`.
 
 ## Use
 
+Use `--help` (or `-h`) at any level for the relevant commands, purpose, flags and examples:
+
+```powershell
+pep --help
+pep auth --help
+pep auth login --help
+pep docs get --help
+pep skills sync --help
+pep nexus setup --help
+```
+
+`pep help auth login` is equivalent to `pep auth login --help`. Help is available without
+logging in and does not access credentials or contact any service. The `pep-cli` alias supports
+the same commands.
+
 ```powershell
 pep auth login
 pep auth status
