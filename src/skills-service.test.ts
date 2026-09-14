@@ -16,56 +16,9 @@ const tarEntry = (path: string, body = ""): TarEntry => ({
   data: encoder.encode(body),
 });
 
-describe("planSkillFiles —— 剥两层前缀", () => {
-  it("剥掉归档根与 skills/，剩下的第一段就是 skill 名", () => {
-    expect(
-      planSkillFiles([
-        tarEntry(`${ROOT}/skills/coding/SKILL.md`, "# coding"),
-        tarEntry(`${ROOT}/skills/coding/references/audit.md`, "# audit"),
-      ]),
-    ).toEqual([
-      { skill: "coding", path: "SKILL.md", data: encoder.encode("# coding") },
-      {
-        skill: "coding",
-        path: "references/audit.md",
-        data: encoder.encode("# audit"),
-      },
-    ]);
-  });
+// planSkillFiles 的用例搬去了 `skills-plan.test.ts` —— 定位方式 2026-09-14 从「按层级剥」
+// 改成「找 SKILL.md」，那一组整体重写，放在一起更好读。
 
-  // 判断「在不在」而不是硬剥第二层：上游哪天改了打包范围，这里不该把 skill 名字当成它。
-  it("归档里没有 skills/ 这一层时，只剥归档根", () => {
-    expect(planSkillFiles([tarEntry(`${ROOT}/coding/SKILL.md`)])).toEqual([
-      { skill: "coding", path: "SKILL.md", data: encoder.encode("") },
-    ]);
-  });
-
-  it("归档根下的散文件不属于任何 skill，跳过", () => {
-    expect(
-      planSkillFiles([
-        tarEntry(`${ROOT}/README.md`),
-        tarEntry(`${ROOT}/skills/README.md`),
-        tarEntry(`${ROOT}/skills/a/SKILL.md`),
-      ]).map((one) => one.skill),
-    ).toEqual(["a"]);
-  });
-
-  it("多余的斜杠与 . 段忽略掉", () => {
-    expect(planSkillFiles([tarEntry(`${ROOT}//skills/./a//SKILL.md`)])).toEqual(
-      [{ skill: "a", path: "SKILL.md", data: encoder.encode("") }],
-    );
-  });
-
-  // ⚠ tar-slip：一条 `../../.ssh/authorized_keys` 能让写盘跳出目标目录。归档来自我们自己的
-  // PEP + 自己的 GitLab，所以出现它不是常规情况，是信号 —— 抛，不是跳过。
-  it("想跳出目录的条目 ⇒ 抛，整次同步作废", () => {
-    expect(() =>
-      planSkillFiles([tarEntry(`${ROOT}/skills/../../.ssh/authorized_keys`)]),
-    ).toThrow(/escapes its directory/);
-  });
-});
-
-/** 内存里的账本，省得测试碰真配置目录。 */
 function memoryStateStore(
   initial: SkillsState | null = null,
 ): SkillsStateStore & {
@@ -178,21 +131,19 @@ describe("syncSkills —— 落盘", () => {
       "# b",
     );
     expect(store.current).toMatchObject({
-      version: 1,
-      commit: COMMIT,
-      skills: ["a", "b"],
+      version: 2,
+      packages: { "semi-integration": { commit: COMMIT, skills: ["a", "b"] } },
     });
   });
 
   it("带上 Bearer 打 /api/skills/archive", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(archiveResponse({}));
     await syncSkills(deps(fetchImpl, memoryStateStore()));
-    expect(fetchImpl).toHaveBeenCalledWith(
-      "https://pep.example.com/api/skills/archive",
-      {
-        headers: { Authorization: "Bearer tok" },
-      },
-    );
+    const [url, init] = fetchImpl.mock.calls[0] as [URL, RequestInit];
+    expect(url.origin + url.pathname).toBe("https://pep.example.com/api/skills/archive");
+    // ⚠ 省略 name 时也显式带上 —— 服务端那条兼容位迟早要撤，带着就不依赖它。
+    expect(url.searchParams.get("name")).toBe("semi-integration");
+    expect(init).toEqual({ headers: { Authorization: "Bearer tok" } });
   });
 
   it("同一个提交 ⇒ 不解包、不写盘", async () => {
@@ -202,14 +153,14 @@ describe("syncSkills —— 落盘", () => {
         archiveResponse({ [`${ROOT}/skills/a/SKILL.md`]: "# a" }),
       );
     const store = memoryStateStore({
-      version: 1,
-      commit: COMMIT,
-      skills: ["a"],
+      version: 2,
       directory,
+      packages: { "semi-integration": { commit: COMMIT, skills: ["a"] } },
     });
 
     expect(await syncSkills(deps(fetchImpl, store))).toEqual({
       status: "unchanged",
+      name: "semi-integration",
       commit: COMMIT,
     });
     expect(await readdir(directory)).toEqual([]);
@@ -222,10 +173,9 @@ describe("syncSkills —— 落盘", () => {
         archiveResponse({ [`${ROOT}/skills/a/SKILL.md`]: "# a" }),
       );
     const store = memoryStateStore({
-      version: 1,
-      commit: COMMIT,
-      skills: ["a"],
+      version: 2,
       directory: "/somewhere/else",
+      packages: { "semi-integration": { commit: COMMIT, skills: ["a"] } },
     });
 
     expect((await syncSkills(deps(fetchImpl, store))).status).toBe("written");
@@ -242,7 +192,7 @@ describe("syncSkills —— 落盘", () => {
     const result = await syncSkills(deps(fetchImpl, store));
     expect(result).toMatchObject({ status: "written" });
     expect(result).not.toHaveProperty("commit");
-    expect(store.current?.commit).toBeUndefined();
+    expect(store.current?.packages["semi-integration"]?.commit).toBeUndefined();
   });
 
   it("上游删掉的文件，本地跟着消失（先删后写）", async () => {
@@ -257,7 +207,11 @@ describe("syncSkills —— 落盘", () => {
     await syncSkills(
       deps(
         fetchImpl,
-        memoryStateStore({ version: 1, skills: ["a"], directory }),
+        memoryStateStore({
+          version: 2,
+          directory,
+          packages: { "semi-integration": { skills: ["a"] } },
+        }),
       ),
     );
 
@@ -276,7 +230,11 @@ describe("syncSkills —— 落盘", () => {
     const result = await syncSkills(
       deps(
         fetchImpl,
-        memoryStateStore({ version: 1, skills: ["a", "gone"], directory }),
+        memoryStateStore({
+          version: 2,
+          directory,
+          packages: { "semi-integration": { skills: ["a", "gone"] } },
+        }),
       ),
     );
 

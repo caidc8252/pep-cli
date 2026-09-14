@@ -8,7 +8,7 @@ description: Newland（新大陆）支付终端与 PEP 开发者平台的接入�
 PEP 的开发者文档与接入指南**不公开**，要凭 PEP 账号读取。`pep-cli` 是那把钥匙：它换取一枚
 访问令牌，然后用它取文档、并把平台维护的其余 skills 同步下来。
 
-**本 skill 只做引导。** 真正的接入指南是 `pep skills sync` 同步下来的那些——它们由平台维护、
+**本 skill 只做引导。** 真正的接入指南是 `pep skills add` 装下来的那些——它们由平台维护、
 随时更新。本文件刻意不复制它们的内容：复制一份就会过期，而过期的接入指南比没有更糟。
 
 ## 第 0 步 · 先看现在是什么状态
@@ -70,17 +70,28 @@ pep auth login --issuer https://pep-webapp-view.onrender.com
 
 用户说登完之后，再跑一次第 0 步那条 `pep auth status` 确认，然后继续。
 
-## 第 3 步 · 同步平台下发的 skills
+## 第 3 步 · 装平台下发的 skills
+
+先看有哪些，再装：
 
 ```bash
-pep skills sync
+pep skills list            # 平台下发哪些包；装过的行首带 *
+pep skills add <名字>      # 装其中一个
 ```
+
+装完之后 `pep skills sync` 会刷新**已经装过的全部**，不用再报名字。
 
 它把平台维护的接入指南写进 Claude Code 找 skill 的目录（`~/.claude/skills`，`--dir` 可改）。
 只动它自己写过的那些，用户手放进去的文件不碰。
 
-**同步完要主动去读那些文件**：新写入的 skill 不一定当场被会话发现。直接读
+⚠ **一个包可能含不止一个 skill**：仓里每个直接含 `SKILL.md` 的目录都会成为一个，不管它在
+第几层。所以 `add` 一次可能装出好几个 —— 命令会把名字列出来。
+
+**装完要主动去读那些文件**：新写入的 skill 不一定当场被会话发现。直接读
 `~/.claude/skills/<名字>/SKILL.md`，不要等它自动出现。
+
+⚠ 如果 `sync` 说「Nothing added yet」，那是**还没 add 过**，不是出错 —— 它不会替用户猜一个
+默认的去装。照上面 `list` → `add` 走一遍。
 
 ## 第 4 步 · 配 Maven 仓库凭据（**只有 Android** 要拉包才做）
 
@@ -149,8 +160,9 @@ curl 或别的 HTTP 客户端要直接打 PEP 接口时用它。**不要把令�
 | `2D002` / "This application is not authorized to sign you in." | 这个环境上没有 CLI 用的那枚客户端；或本地存着 0.1.1 之前版本留下的旧 client_id | 先确认装的是最新版（`pep --version` ≥ 0.1.1）；仍旧报错就 `pep auth logout` 再重登 |
 | `docs list` 是空的 | 登录成功了，但这个账号没被授予任何文档 | 找 PEP 管理员开权限，不是 CLI 的问题 |
 | `docs get` 回 403 | 有账号但没这一篇的权限 | 同上 |
-| `skills sync` 回 503 | **平台侧**的问题（上游仓库没配好或不可达） | 报给 PEP 管理员，重试无用 |
+| `skills add` / `sync` 回 503 | **平台侧**的问题（上游仓库没配好或不可达） | 报给 PEP 管理员，重试无用 |
 | `invalid_scope` / 400 | 这个环境的客户端登记与 CLI 版本不匹配 | 报给 PEP 管理员 |
+| `skills add` 回 404 | 名字写错了 | `pep skills list` 看准确的名字；重试无用 |
 | `nexus setup` 回 409 | **不是错误**：这家公司已经开过凭据了 | 用之前存下的那份；丢了找 PEP 管理员在 Nexus 上重置 |
 | `nexus setup` 回 503 | 平台侧没配好 Nexus 或上游不可达 | 报给 PEP 管理员，重试无用 |
 | 跑完了但 Gradle 仍 401 | 环境变量只对**新** shell 生效 | 开个新终端，或 `eval "$(pep nexus setup)"` |

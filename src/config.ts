@@ -1,7 +1,13 @@
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { CliConfig, ConfigStore, SkillsState, SkillsStateStore } from "./types.js";
+import type {
+  CliConfig,
+  ConfigStore,
+  SkillsState,
+  SkillsStateStore,
+  SkillsStateV1,
+} from "./types.js";
 
 /**
  * CLI 的 client_id。**一个名字，所有环境通用** —— 与 issuer 不同，它不按构建环境分叉。
@@ -89,6 +95,14 @@ export const DEFAULT_RESOURCES = ["urn:newland:pep:docs"] as const;
  * 2026-09-09 实测该地址活着：`/llms.txt` 回 200 `text/plain`，无 Bearer 时 **0 字节**
  * —— 0 字节不是坏了，是 `AUTH_GUARD_ENABLED=true` 下匿名身份的角色为空集，索引因此为空。
  */
+/**
+ * v1 的账迁过来时，那一串 skill 归到哪个包名下。
+ *
+ * ⚠ 它必须与 PEP 目录里**存量 CLI 默认拿到的那一条**同名（服务端的 `LEGACY_DEFAULT_SKILL`），
+ * 否则迁移之后第一次 `sync` 会认为「那个包没装过」，于是把它重新铺一遍、而旧目录没人清。
+ */
+export const LEGACY_PACKAGE = "semi-integration";
+
 export const DEFAULT_DOCS_URL = "https://pep-developer-docs.onrender.com";
 
 export type BuildEnvironment = "development" | "view" | "production";
@@ -230,7 +244,30 @@ export function fileConfigStore(path = configPath()): ConfigStore {
   };
 }
 
+/** v2 的账。`packages` 的值只判形状，不判里面的名字 —— 名字归 PEP 的目录管。 */
 function isSkillsState(value: unknown): value is SkillsState {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.version !== 2) return false;
+  if (typeof candidate.directory !== "string") return false;
+  if (candidate.linkedInto !== undefined && typeof candidate.linkedInto !== "string") return false;
+  const packages = candidate.packages;
+  // ⚠ `Array.isArray` 那一半不能省：数组在 JS 里也是 object，漏判的话 `packages: []` 会被
+  // 当成合法的账收下，之后 `state.packages[name]` 拿到的是下标而不是包名。
+  if (typeof packages !== "object" || packages === null || Array.isArray(packages)) return false;
+  return Object.values(packages as Record<string, unknown>).every((one) => {
+    if (typeof one !== "object" || one === null) return false;
+    const pkg = one as Record<string, unknown>;
+    return (
+      Array.isArray(pkg.skills) &&
+      pkg.skills.every((n) => typeof n === "string") &&
+      (pkg.commit === undefined || typeof pkg.commit === "string")
+    );
+  });
+}
+
+/** v1 的账（2026-09-14 之前）。只用来认出它、好迁移，不再写回这个形状。 */
+function isSkillsStateV1(value: unknown): value is SkillsStateV1 {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Record<string, unknown>;
   return (
@@ -239,9 +276,29 @@ function isSkillsState(value: unknown): value is SkillsState {
     Array.isArray(candidate.skills) &&
     candidate.skills.every((one) => typeof one === "string") &&
     (candidate.commit === undefined || typeof candidate.commit === "string") &&
-    // 可选：0.1.1 及更早写下的 skills.json 没有这个键，读它们不该报「状态损坏」。
     (candidate.linkedInto === undefined || typeof candidate.linkedInto === "string")
   );
+}
+
+/**
+ * v1 → v2。
+ *
+ * ⚠ 那一串 skill 名必须归到 `LEGACY_PACKAGE` 名下，**不能丢**：它记的是「哪些目录是我们
+ * 铺的」，也就是「哪些允许被删」。丢了的话，用户已装的 skill 会永远留在磁盘上没人清 ——
+ * 上游删掉一个 skill，本地那份会一直在。
+ */
+export function migrateSkillsState(old: SkillsStateV1): SkillsState {
+  return {
+    version: 2,
+    directory: old.directory,
+    ...(old.linkedInto !== undefined ? { linkedInto: old.linkedInto } : {}),
+    packages: {
+      [LEGACY_PACKAGE]: {
+        ...(old.commit !== undefined ? { commit: old.commit } : {}),
+        skills: old.skills,
+      },
+    },
+  };
 }
 
 export function fileSkillsStateStore(path = skillsStatePath()): SkillsStateStore {
@@ -251,7 +308,10 @@ export function fileSkillsStateStore(path = skillsStatePath()): SkillsStateStore
         const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
         // 账坏了不该让同步停摆 —— 当成「没同步过」重来一遍即可，代价只是多写一次盘。
         // 这跟 config 不同：那个坏了就登不上，必须让人看见。
-        return isSkillsState(parsed) ? parsed : null;
+        if (isSkillsState(parsed)) return parsed;
+        // v1 的账迁过来 —— 直接当「没同步过」会让用户已装的 skill 永远没人清理。
+        if (isSkillsStateV1(parsed)) return migrateSkillsState(parsed);
+        return null;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
         if (error instanceof SyntaxError) return null;

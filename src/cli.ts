@@ -18,10 +18,15 @@ import { createOAuthClient } from "./oauth-client.js";
 import { fetchDocContent, fetchDocsIndex } from "./docs-service.js";
 import { USERNAME_VAR, PASSWORD_VAR } from "./maven-env.js";
 import { setupNexusCredential } from "./nexus-service.js";
-import { syncSkills } from "./skills-service.js";
+import {
+  fetchSkillsCatalog,
+  installedPackages,
+  syncSkills,
+  type SkillsSyncResult,
+} from "./skills-service.js";
 import type { CliConfig, ConfigStore } from "./types.js";
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 
 function usage(): string {
   return `PEP CLI ${VERSION}
@@ -31,6 +36,8 @@ Usage:
   pep auth status
   pep auth token
   pep auth logout
+  pep skills list
+  pep skills add <name> [--dir <path>]
   pep skills sync [--dir <path>]
   pep docs list [--docs-url <url>]
   pep docs get <path> [--docs-url <url>]
@@ -42,6 +49,11 @@ NOT remembered — pass it every time you log in against a non-default deploymen
 one. It defaults to the docs platform — a token minted without it is rejected by every
 resource server, and their answer looks exactly like "this token does not exist".
 Use \`pep auth token\` when another agent needs a fresh bearer token.
+
+\`pep skills list\` shows which skill packages this PEP deployment offers; \`pep skills add <name>\`
+installs one of them and \`pep skills sync\` refreshes everything you have already added. A package
+may contain more than one skill — every directory holding a SKILL.md becomes one, wherever it sits
+in the repository.
 
 \`pep skills sync\` fetches the latest skills from PEP and writes them to the shared agent
 directory (${defaultSkillsDirectory()}), which Codex, Cursor, Amp and ~20 other agents read
@@ -66,6 +78,30 @@ are also printed on stdout: \`eval "$(pep nexus setup)"\` uses them in the curre
 Only Android needs this — the Windows and iOS SDKs are cloned from Git, not pulled from Maven.
 The password is shown by PEP once and never stored, so a second run reports 409 rather than
 handing it out again.`;
+}
+
+/** 一次同步的汇报。`add` 与 `sync` 共用 —— 两者的产出形状本来就一样。 */
+function reportSync(result: SkillsSyncResult): void {
+  if (result.status === "unchanged") {
+    console.log(`${result.name}: already at ${result.commit}. Nothing to do.`);
+    return;
+  }
+  console.log(
+    `${result.name}: wrote ${result.fileCount} file(s) across ${result.skills.length} skill(s) to ${result.directory}`,
+  );
+  if (result.skills.length > 0) console.log(`  skills: ${result.skills.join(" ")}`);
+  if (result.linkedInto !== undefined) {
+    // 两行分开说：一行是「22 家共读的那份」，一行是「额外接给 Claude Code 的那条」。
+    // 合成一句的话，用户看不出哪个是实体、哪个是链接，也就看不出该去哪儿改。
+    console.log(
+      result.copiedCount === undefined
+        ? `  linked into ${result.linkedInto} for Claude Code`
+        : `  linked into ${result.linkedInto} for Claude Code (${result.copiedCount} copied instead — links unavailable here)`,
+    );
+  }
+  if (result.commit) console.log(`  commit: ${result.commit}`);
+  if (result.removed.length > 0)
+    console.log(`  removed (gone upstream): ${result.removed.join(" ")}`);
 }
 
 /** 可重复的选项，按出现顺序取值。`--resource` 是唯一一个 —— RFC 8707 允许一次带多个受众。 */
@@ -234,41 +270,63 @@ export async function main(): Promise<void> {
   }
 
   if (group === "skills") {
-    if (command !== "sync") throw new Error(`Unknown skills command.\n\n${usage()}`);
+    if (command !== "sync" && command !== "add" && command !== "list") {
+      throw new Error(`Unknown skills command.\n\n${usage()}`);
+    }
+    // `add` 的位置参数在选项摘掉之前取 —— 它紧跟命令，不会跟 `--dir` 的值混。
+    const requested = command === "add" ? args.shift() : undefined;
+    if (command === "add" && !requested) throw new Error("pep skills add needs a package name.");
+
     // 显式 `--dir` = 「就铺到这儿，别的什么都别做」—— 给那些不读通用目录的 agent 用的逃生口，
     // 所以那一档不接任何链接（接了反而会往用户没要求的地方写）。
-    const explicitDirectory = option(args, "--dir");
+    const explicitDirectory = command === "list" ? undefined : option(args, "--dir");
     const directory = explicitDirectory ?? defaultSkillsDirectory();
     if (args.length > 0) throw new Error(`Unknown option: ${args[0]}`);
+
     // currentAuthorization 会在令牌快过期时先刷新 —— 同步是一次可能不短的下载，拿一枚
     // 马上就到期的令牌出门没有意义。
     const authorization = await auth.currentAuthorization();
-    const result = await syncSkills({
-      issuer: authorization.issuer,
-      accessToken: authorization.accessToken,
-      directory,
-      ...(explicitDirectory === undefined ? { linkInto: claudeSkillsDirectory() } : {}),
-      stateStore: fileSkillsStateStore(),
-    });
-    if (result.status === "unchanged") {
-      console.log(`Already at ${result.commit}. Nothing to do.`);
+    const remote = { issuer: authorization.issuer, accessToken: authorization.accessToken };
+
+    if (command === "list") {
+      const catalog = await fetchSkillsCatalog(remote);
+      if (catalog.length === 0) {
+        // 空清单不是故障，是这个部署的答案 —— 说清楚，免得对接方去查网络。
+        console.error("This PEP deployment offers no skill packages.");
+        return;
+      }
+      const installed = new Set(await installedPackages(fileSkillsStateStore()));
+      for (const one of catalog) {
+        // 装过的标一下 —— 否则用户看不出 `add` 过哪个，而那正是决定下一步的信息。
+        console.log(
+          [installed.has(one.name) ? "*" : " ", one.name, one.description]
+            .filter(Boolean)
+            .join("\t"),
+        );
+      }
+      console.error("\n* = already added; `pep skills sync` refreshes those.");
       return;
     }
-    console.log(
-      `Wrote ${result.fileCount} file(s) across ${result.skills.length} skill(s) to ${result.directory}`,
-    );
-    if (result.linkedInto !== undefined) {
-      // 两行分开说：第一行是「22 家共读的那份」，第二行是「额外接给 Claude Code 的那条」。
-      // 合成一句的话，用户看不出哪个是实体、哪个是链接，也就看不出该去哪儿改。
-      console.log(
-        result.copiedCount === undefined
-          ? `Linked into ${result.linkedInto} for Claude Code`
-          : `Linked into ${result.linkedInto} for Claude Code (${result.copiedCount} copied instead — links unavailable here)`,
-      );
+
+    const stateStore = fileSkillsStateStore();
+    const targets =
+      command === "add" ? [requested as string] : await installedPackages(stateStore);
+    if (targets.length === 0) {
+      // `sync` 而账上一个都没有：不猜一个默认值去装，那会替用户做决定。
+      console.error("Nothing added yet. Run `pep skills list`, then `pep skills add <name>`.");
+      return;
     }
-    if (result.commit) console.log(`Commit: ${result.commit}`);
-    if (result.removed.length > 0)
-      console.log(`Removed (gone upstream): ${result.removed.join(" ")}`);
+
+    for (const name of targets) {
+      const result = await syncSkills({
+        ...remote,
+        name,
+        directory,
+        ...(explicitDirectory === undefined ? { linkInto: claudeSkillsDirectory() } : {}),
+        stateStore,
+      });
+      reportSync(result);
+    }
     return;
   }
 
