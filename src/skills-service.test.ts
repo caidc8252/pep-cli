@@ -77,13 +77,18 @@ beforeEach(async () => {
   directory = await mkdtemp(join(tmpdir(), "pep-skills-"));
 });
 
-const deps = (fetchImpl: unknown, stateStore: SkillsStateStore) => ({
+const deps = (
+  fetchImpl: unknown,
+  stateStore: SkillsStateStore,
+  overrides: { directory?: string; linkInto?: string } = {},
+) => ({
   issuer: "https://pep.example.com",
   accessToken: "tok",
   source: "group/sub/repo",
   directory,
   stateStore,
   fetch: fetchImpl as typeof globalThis.fetch,
+  ...overrides,
 });
 
 describe("updateSkills —— 失败的归因", () => {
@@ -133,8 +138,11 @@ describe("updateSkills —— 落盘", () => {
       "# b",
     );
     const pkg = store.current?.packages["group/sub/repo"];
-    expect(store.current?.version).toBe(3);
+    expect(store.current?.version).toBe(4);
     expect(pkg?.commit).toBe(COMMIT);
+    // v4 起落点记在**包里**。漏记的话 `update` 不带参数时算不出该往哪儿写，只能退回默认
+    // 目录 —— 用 `--dir` / `--project` 装的包会被一次 update 悄悄搬走。
+    expect(pkg?.directory).toBe(directory);
     // 哈希是内容算出来的，不钉具体值 —— 钉的是「每个 skill 都记了一个非空哈希」，
     // 因为空串在 update 里当作「不知道」，账里留空等于下次一定误报「变了」。
     expect(Object.keys(pkg?.skills ?? {}).sort()).toEqual(["a", "b"]);
@@ -160,9 +168,8 @@ describe("updateSkills —— 落盘", () => {
         archiveResponse({ [`${ROOT}/skills/a/SKILL.md`]: "# a" }),
       );
     const store = memoryStateStore({
-      version: 3,
-      directory,
-      packages: { "group/sub/repo": { commit: COMMIT, skills: { "a": "h" } } },
+      version: 4,
+      packages: { "group/sub/repo": { commit: COMMIT, directory, skills: { "a": "h" } } },
     });
 
     expect(await updateSkills(deps(fetchImpl, store))).toEqual({
@@ -180,9 +187,10 @@ describe("updateSkills —— 落盘", () => {
         archiveResponse({ [`${ROOT}/skills/a/SKILL.md`]: "# a" }),
       );
     const store = memoryStateStore({
-      version: 3,
-      directory: "/somewhere/else",
-      packages: { "group/sub/repo": { commit: COMMIT, skills: { "a": "h" } } },
+      version: 4,
+      packages: {
+        "group/sub/repo": { commit: COMMIT, directory: "/somewhere/else", skills: { "a": "h" } },
+      },
     });
 
     expect((await updateSkills(deps(fetchImpl, store))).status).toBe("written");
@@ -215,9 +223,8 @@ describe("updateSkills —— 落盘", () => {
       deps(
         fetchImpl,
         memoryStateStore({
-          version: 3,
-          directory,
-          packages: { "group/sub/repo": { skills: { "a": "h" } } },
+          version: 4,
+          packages: { "group/sub/repo": { directory, skills: { "a": "h" } } },
         }),
       ),
     );
@@ -238,9 +245,8 @@ describe("updateSkills —— 落盘", () => {
       deps(
         fetchImpl,
         memoryStateStore({
-          version: 3,
-          directory,
-          packages: { "group/sub/repo": { skills: { "a": "h", "gone": "h" } } },
+          version: 4,
+          packages: { "group/sub/repo": { directory, skills: { "a": "h", "gone": "h" } } },
         }),
       ),
     );
@@ -434,9 +440,8 @@ describe("updateSkills —— 哪些 skill 真的变了", () => {
   // update 漏掉真正的更新，所以那一档必须算 updated。
   it("账上哈希是空串（旧版迁来的）⇒ 算 updated，不算 unchanged", async () => {
     const store = memoryStateStore({
-      version: 3,
-      directory,
-      packages: { "group/sub/repo": { commit: "old", skills: { a: "", b: "" } } },
+      version: 4,
+      packages: { "group/sub/repo": { commit: "old", directory, skills: { a: "", b: "" } } },
     });
     const result = await updateSkills(
       deps(vi.fn().mockResolvedValue(archive("# a", "# b")), store),
@@ -468,5 +473,108 @@ describe("updateSkills —— 哪些 skill 真的变了", () => {
       ),
     );
     expect(result).toMatchObject({ updated: ["a"] });
+  });
+});
+
+// ═══ 落点搬家 ══════════════════════════════════════════════════════════════
+//
+// `--project` 之后「同一个包换个地方铺」成了常规操作（个人级 ⇄ 项目级）。搬完不清旧处的
+// 后果不是报错，是**两份都在**：agent 照样读得到原处那份，而它从此再也不会更新 —— 一个
+// 不会自己暴露的错误。
+describe("落点变了 ⇒ 旧处那份清掉", () => {
+  const archiveOf = () => archiveResponse({ [`${ROOT}/skills/a/SKILL.md`]: "# a" });
+
+  it("canonical 与链接两处都清，新处照写", async () => {
+    const oldDirectory = await mkdtemp(join(tmpdir(), "pep-old-"));
+    const oldLink = await mkdtemp(join(tmpdir(), "pep-oldlink-"));
+    // 旧处铺好的样子：canonical 一份 + 链接目录一份。
+    for (const root of [oldDirectory, oldLink]) {
+      await mkdir(join(root, "a"), { recursive: true });
+      await writeFile(join(root, "a", "SKILL.md"), "旧的");
+    }
+    const store = memoryStateStore({
+      version: 4,
+      packages: {
+        "group/sub/repo": {
+          commit: COMMIT,
+          directory: oldDirectory,
+          linkedInto: oldLink,
+          skills: { a: "h" },
+        },
+      },
+    });
+
+    // 搬到 `directory`（本用例的新落点），且这一次不接链接。
+    const result = await updateSkills(deps(vi.fn().mockResolvedValue(archiveOf()), store));
+
+    expect(result.status).toBe("written");
+    expect(await readdir(oldDirectory)).toEqual([]);
+    expect(await readdir(oldLink)).toEqual([]);
+    expect(await readFile(join(directory, "a", "SKILL.md"), "utf8")).toBe("# a");
+    // 账上记的落点跟着换 —— 不换的话下一次 update 又会去清新处。
+    expect(store.current?.packages["group/sub/repo"]?.directory).toBe(directory);
+    expect(store.current?.packages["group/sub/repo"]?.linkedInto).toBeUndefined();
+  });
+
+  // ⚠ commit 一样时有一条「不解包、不写盘」的快路。落点变了却走了那条快路，等于**什么都
+  // 没做**却报成功：新处空着，旧处还在。
+  it("提交没变但落点变了 ⇒ 照写，不能走「unchanged」那条快路", async () => {
+    const oldDirectory = await mkdtemp(join(tmpdir(), "pep-old-"));
+    const store = memoryStateStore({
+      version: 4,
+      packages: {
+        "group/sub/repo": { commit: COMMIT, directory: oldDirectory, skills: { a: "h" } },
+      },
+    });
+
+    const result = await updateSkills(deps(vi.fn().mockResolvedValue(archiveOf()), store));
+
+    expect(result.status).toBe("written");
+    expect(await readdir(directory)).toEqual(["a"]);
+  });
+
+  // ⚠ canonical 没变、只是要多接一条链接的那一档。漏判的话 canonical 是对的，
+  // 但新的 agent 目录里一条链接都没有 —— 表现是「同步说成功了，Claude Code 看不见」。
+  it("提交没变、canonical 也没变，只是链接目录变了 ⇒ 照样重铺", async () => {
+    const link = await mkdtemp(join(tmpdir(), "pep-link-"));
+    const store = memoryStateStore({
+      version: 4,
+      packages: { "group/sub/repo": { commit: COMMIT, directory, skills: { a: "h" } } },
+    });
+
+    const result = await updateSkills(
+      deps(vi.fn().mockResolvedValue(archiveOf()), store, { linkInto: link }),
+    );
+
+    expect(result.status).toBe("written");
+    expect(await readdir(link)).toEqual(["a"]);
+  });
+
+  it("落点完全没变 ⇒ 仍然走「unchanged」，别把这条快路一起修没了", async () => {
+    const store = memoryStateStore({
+      version: 4,
+      packages: { "group/sub/repo": { commit: COMMIT, directory, skills: { a: "h" } } },
+    });
+
+    expect((await updateSkills(deps(vi.fn().mockResolvedValue(archiveOf()), store))).status).toBe(
+      "unchanged",
+    );
+  });
+
+  // ⚠ 一本账上两个包各在各处 —— 这正是 v4 把落点从顶层搬进包里要支持的情形。
+  // 写 B 的时候把 A 的落点带歪，A 的下一次 update 就会搬家。
+  it("写一个包不会动到另一个包记着的落点", async () => {
+    const store = memoryStateStore({
+      version: 4,
+      packages: { "other/pkg": { directory: "/elsewhere", linkedInto: "/elselink", skills: {} } },
+    });
+
+    await updateSkills(deps(vi.fn().mockResolvedValue(archiveOf()), store));
+
+    expect(store.current?.packages["other/pkg"]).toEqual({
+      directory: "/elsewhere",
+      linkedInto: "/elselink",
+      skills: {},
+    });
   });
 });

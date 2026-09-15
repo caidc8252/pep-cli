@@ -68,16 +68,18 @@ export interface ConfigStore {
  *
  * 逐个记哈希之后，`update` 能分出 updated / unchanged。做法参照 `npx skills` 的
  * `.skill-lock.json`（它逐 skill 记 `skillFolderHash`，按 source+ref 分组取一次源再逐个比）。
+ *
+ * ── v4 起落点**按包**记（2026-09-15）──────────────────────────────────────────
+ * v3 的 `directory` / `linkedInto` 在顶层，全局一份 —— 那等于断言「这台机器上所有包都铺在
+ * 同一个地方」。加了 `--project` 之后这句话不再成立：项目级的包铺在 `<项目>/.agents/skills`，
+ * 个人级的铺在 `~/.agents/skills`，同一本账上两种并存。
+ *
+ * ⚠ 顶层那一份还有个**当场就错**的后果：`update` 不带参数时算不出该往哪儿写，只能退回默认
+ * 目录 —— 于是用 `--dir` 装的包，一次 `update` 就被搬回 `~/.agents/skills`，而原处那份没人清。
+ * 按包记之后 `update` 读账即知落点，不必再带一次参数（这正是 v4 存在的理由）。
  */
 export type SkillsState = {
-  version: 3;
-  /** 上次写到哪儿（canonical）。换目录后旧的那批要照着它清掉。 */
-  directory: string;
-  /**
-   * 上次把链接接进了哪个 agent 目录。移除某个 skill 时两处都要清 —— 只清 canonical 会
-   * 留下一条指向空处的死链。`undefined` = 上次用了 `--dir`，没接链接。
-   */
-  linkedInto?: string;
+  version: 4;
   /** 装过哪些包，键是调用方给的那串仓库地址（**原样，不规范化**）。 */
   packages: Record<string, SkillsPackageState>;
 };
@@ -86,6 +88,16 @@ export type SkillsPackageState = {
   /** 上次装下的那个提交（PEP 的 `X-Skills-Commit`）。服务端摘不到时没有这个键。 */
   commit?: string;
   /**
+   * **这个包**上次写到哪儿（canonical）。换落点后旧的那批要照着它清掉 —— v4 起按包记，
+   * 理由见上面 SkillsState 的头注。
+   */
+  directory: string;
+  /**
+   * 上次把链接接进了哪个 agent 目录。移除某个 skill 时两处都要清 —— 只清 canonical 会
+   * 留下一条指向空处的死链。`undefined` = 上次用了 `--dir`，没接链接。
+   */
+  linkedInto?: string;
+  /**
    * 这个包上次铺出的每个 skill → 它的内容哈希。
    *
    * ⚠ 键就是「**只有这些才允许被删**」的那张名单 —— 用户自己放的、以及别的包铺的，都不归
@@ -93,6 +105,14 @@ export type SkillsPackageState = {
    * 「不知道」不该被说成「没变」。
    */
   skills: Record<string, string>;
+};
+
+/** v3 的账。**只读** —— 它的落点在顶层，迁移时抄进每个包。 */
+export type SkillsStateV3 = {
+  version: 3;
+  directory: string;
+  linkedInto?: string;
+  packages: Record<string, { commit?: string; skills: Record<string, string> }>;
 };
 
 /** v1 的账（2026-09-14 之前）。**只读**：遇到就迁到最新，不再写回这个形状。 */

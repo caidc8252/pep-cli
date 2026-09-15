@@ -273,11 +273,13 @@ export async function updateSkills(
   const commit = response.headers.get("x-skills-commit") ?? undefined;
   const state = await dependencies.stateStore.read();
   const previous = state?.packages[name];
-  if (
-    commit !== undefined &&
-    commit === previous?.commit &&
-    state?.directory === dependencies.directory
-  ) {
+  // ⚠ 落点也要比，**两段都比**：commit 一样但落点变了（换了 scope、或换了 `--dir`）时
+  // 盘上那份还在原处，直接答「没变」等于什么都没做。链接目录单独变了也算变 —— 那一档
+  // canonical 已经对了，但新的 agent 目录里还没有链接。
+  const sameTarget =
+    previous?.directory === dependencies.directory &&
+    previous?.linkedInto === dependencies.linkInto;
+  if (commit !== undefined && commit === previous?.commit && sameTarget) {
     // 已经是这一版了。体还没读完就掐掉，省下传输 —— 这是个半吊子的省法，真要省该是
     // 条件请求（CLI 带 If-None-Match、PEP 答 304），但 PEP 那侧还没做。
     await response.body?.cancel();
@@ -308,6 +310,23 @@ export async function updateSkills(
     else updated.push(skill);
   }
 
+  // ── 先按**旧账**清一遍 ──────────────────────────────────────────────────────
+  // 两种要清：上游删掉的那些，以及落点变了之后**整份留在原处**的那些。
+  //
+  // ⚠ 必须赶在写新的之前做完。落点没变、只是链接目录变了时，旧 canonical 就是新 canonical
+  // ——放到写完之后清，会把刚写好的那份删掉。
+  const removed = Object.keys(previous?.skills ?? {}).filter((skill) => !skills.includes(skill));
+  if (previous !== undefined) {
+    const stale = sameTarget ? removed : Object.keys(previous.skills);
+    for (const skill of stale) {
+      await rm(join(previous.directory, skill), { recursive: true, force: true });
+      // canonical 与链接两处都要清：只清一边会留下一条指向空处的死链（或一份永不更新的副本）。
+      if (previous.linkedInto !== undefined) {
+        await rm(join(previous.linkedInto, skill), { recursive: true, force: true });
+      }
+    }
+  }
+
   // 先删后写：上游删掉的文件，本地跟着消失。范围严格限定在这次要写的这几个 skill 目录。
   for (const skill of skills) {
     await rm(join(dependencies.directory, skill), { recursive: true, force: true });
@@ -330,28 +349,18 @@ export async function updateSkills(
     }
   }
 
-  // 上次这个包写过、这次没有了的，移除。**只移除记在这个包账上的** —— 用户自己放的、
-  // 以及别的包铺的，都不归它管。canonical 与链接两处都要清：只清一边会留下一条指向空处的
-  // 死链（或一份永不更新的副本）。
-  const removed = Object.keys(previous?.skills ?? {}).filter((skill) => !skills.includes(skill));
-  for (const skill of removed) {
-    await rm(join(state?.directory ?? dependencies.directory, skill), {
-      recursive: true,
-      force: true,
-    });
-    if (state?.linkedInto !== undefined) {
-      await rm(join(state.linkedInto, skill), { recursive: true, force: true });
-    }
-  }
-
   await dependencies.stateStore.write({
-    version: 3,
-    directory: dependencies.directory,
-    ...(dependencies.linkInto !== undefined ? { linkedInto: dependencies.linkInto } : {}),
+    version: 4,
     packages: {
       // 别的包的账原样留着 —— 装 B 不该把 A 的记录抹掉，那会让 A 铺的目录从此没人清理。
+      // v4 起每个包各记各的落点，所以这一份合并不会再把别人的落点带歪。
       ...(state?.packages ?? {}),
-      [name]: { ...(commit ? { commit } : {}), skills: hashes },
+      [name]: {
+        ...(commit ? { commit } : {}),
+        directory: dependencies.directory,
+        ...(dependencies.linkInto !== undefined ? { linkedInto: dependencies.linkInto } : {}),
+        skills: hashes,
+      },
     },
   });
 

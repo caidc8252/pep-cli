@@ -8,6 +8,7 @@ import type {
   SkillsStateStore,
   SkillsStateV1,
   SkillsStateV2,
+  SkillsStateV3,
 } from "./types.js";
 
 /**
@@ -213,6 +214,40 @@ export function claudeSkillsDirectory(): string {
   return join(homedir(), ".claude", "skills");
 }
 
+/**
+ * 一次投放的落点：铺哪儿 + 接到哪儿。
+ *
+ * `linkInto` 为空 = 只铺一份、不接任何链接（`--dir` 那一档）。
+ */
+export type SkillsTarget = {
+  directory: string;
+  linkInto?: string;
+};
+
+/** 默认那一档：个人级，一次同步这台机器上所有项目都看得见。 */
+export function userSkillsTarget(): SkillsTarget {
+  return { directory: defaultSkillsDirectory(), linkInto: claudeSkillsDirectory() };
+}
+
+/**
+ * `--project`：铺进**当前项目**，跟着版本库走、整个团队共享。
+ *
+ * 两个路径不是我们定的，是 `npx skills` 那张 agent 表里的**项目级**落点，照抄：
+ * `.agents/skills/` 是 Codex / Cursor / Amp / Cline / Zed 等共读的那个（与个人级的
+ * `~/.agents/skills` 同名，只是挪到项目下），`.claude/skills/` 是 Claude Code 的。
+ * 所以个人级与项目级的形状完全对称 —— 一份实体 + 一条链接，只是根不同。
+ *
+ * ⚠ **代价**：这两个目录多半会被提交进版本库。同步下来的算不算改动、要不要 gitignore，
+ * 每个项目得自己回答一遍 —— 这正是默认留在个人级的原因（见 `defaultSkillsDirectory`）。
+ * `--project` 是给「这个仓的 skill 要跟着这个仓走」那种情形的显式开关，不是默认。
+ */
+export function projectSkillsTarget(cwd: string = process.cwd()): SkillsTarget {
+  return {
+    directory: join(cwd, ".agents", "skills"),
+    linkInto: join(cwd, ".claude", "skills"),
+  };
+}
+
 function isCliConfig(value: unknown): value is CliConfig {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Record<string, unknown>;
@@ -258,6 +293,20 @@ export function fileConfigStore(path = configPath()): ConfigStore {
 function isSkillsState(value: unknown): value is SkillsState {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Record<string, unknown>;
+  if (candidate.version !== 4) return false;
+  // ⚠ v4 起落点在**包里**，所以判定也下沉到包里 —— 缺 `directory` 的包是坏账，
+  // 收下它的后果是 `update` 拿 undefined 去 join 路径。
+  return isPackageMap(candidate.packages, (skills, pkg) => {
+    if (typeof pkg.directory !== "string") return false;
+    if (pkg.linkedInto !== undefined && typeof pkg.linkedInto !== "string") return false;
+    return isStringMap(skills);
+  });
+}
+
+/** v3：同样的包结构，但落点在顶层、全局一份。**只读**。 */
+function isSkillsStateV3(value: unknown): value is SkillsStateV3 {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
   if (candidate.version !== 3) return false;
   if (typeof candidate.directory !== "string") return false;
   if (candidate.linkedInto !== undefined && typeof candidate.linkedInto !== "string") return false;
@@ -297,12 +346,15 @@ function isSkillsStateV1(value: unknown): value is SkillsStateV1 {
  * ⚠ `Array.isArray` 那一半不能省：数组在 JS 里也是 object，漏了的话 `packages: []` 会被
  * 当成合法的账收下，之后 `state.packages[source]` 拿到的是下标而不是地址。
  */
-function isPackageMap(value: unknown, skillsOk: (skills: unknown) => boolean): boolean {
+function isPackageMap(
+  value: unknown,
+  skillsOk: (skills: unknown, pkg: Record<string, unknown>) => boolean,
+): boolean {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   return Object.values(value as Record<string, unknown>).every((one) => {
     if (typeof one !== "object" || one === null || Array.isArray(one)) return false;
     const pkg = one as Record<string, unknown>;
-    return skillsOk(pkg.skills) && (pkg.commit === undefined || typeof pkg.commit === "string");
+    return skillsOk(pkg.skills, pkg) && (pkg.commit === undefined || typeof pkg.commit === "string");
   });
 }
 
@@ -312,17 +364,25 @@ function isStringMap(value: unknown): boolean {
 }
 
 /**
- * 旧账 → v3。
+ * 旧账 → v4。
  *
  * ⚠ 那些 skill 名必须**一个不丢**：它们记的是「哪些目录是我们铺的」，也就是「哪些允许被
  * 删」。丢了的话，上游删掉一个 skill，本地那份会永远留着没人清。
  *
- * ⚠ 哈希填空串，而不是编一个 —— 空串在 `update` 里一律当作「变了」。把「不知道」说成
- * 「没变」会让迁移后的第一次 update 漏掉真正的更新。
+ * ⚠ **v1 / v2 的哈希填空串，而不是编一个** —— 空串在 `update` 里一律当作「变了」。把
+ * 「不知道」说成「没变」会让迁移后的第一次 update 漏掉真正的更新。
+ *
+ * ⚠ **v3 的哈希要原样保留**，它们是真哈希，不是「不知道」。跟着 v1/v2 一起清成空串会让
+ * 每个存量用户的下一次 update 把所有 skill 都报成「更新了」—— 那正是 v3 当初要消掉的噪音。
+ *
+ * v3 → v4 只搬落点：顶层那一份 `directory` / `linkedInto` 抄进每个包。对 v1 / v2 也一样，
+ * 它们的落点同样在顶层。
  */
-export function migrateSkillsState(old: SkillsStateV1 | SkillsStateV2): SkillsState {
-  const base = {
-    version: 3 as const,
+export function migrateSkillsState(
+  old: SkillsStateV1 | SkillsStateV2 | SkillsStateV3,
+): SkillsState {
+  // 迁移前的三个版本落点都在顶层，全局一份 —— 抄进每个包即是 v4。
+  const where = {
     directory: old.directory,
     ...(old.linkedInto !== undefined ? { linkedInto: old.linkedInto } : {}),
   };
@@ -331,21 +391,27 @@ export function migrateSkillsState(old: SkillsStateV1 | SkillsStateV2): SkillsSt
 
   if (old.version === 1) {
     return {
-      ...base,
+      version: 4,
       packages: {
         [LEGACY_PACKAGE]: {
           ...(old.commit !== undefined ? { commit: old.commit } : {}),
+          ...where,
           skills: unknownHashes(old.skills),
         },
       },
     };
   }
   return {
-    ...base,
+    version: 4,
     packages: Object.fromEntries(
       Object.entries(old.packages).map(([source, pkg]) => [
         source,
-        { ...(pkg.commit !== undefined ? { commit: pkg.commit } : {}), skills: unknownHashes(pkg.skills) },
+        {
+          ...(pkg.commit !== undefined ? { commit: pkg.commit } : {}),
+          ...where,
+          // v2 的 `skills` 是名字数组（哈希未知），v3 的已经是「名字 → 真哈希」。
+          skills: Array.isArray(pkg.skills) ? unknownHashes(pkg.skills) : pkg.skills,
+        },
       ]),
     ),
   };
@@ -360,7 +426,8 @@ export function fileSkillsStateStore(path = skillsStatePath()): SkillsStateStore
         // 这跟 config 不同：那个坏了就登不上，必须让人看见。
         if (isSkillsState(parsed)) return parsed;
         // 旧账迁过来 —— 直接当「没装过」会让用户已装的 skill 永远没人清理。
-        if (isSkillsStateV2(parsed) || isSkillsStateV1(parsed)) return migrateSkillsState(parsed);
+        if (isSkillsStateV3(parsed) || isSkillsStateV2(parsed) || isSkillsStateV1(parsed))
+          return migrateSkillsState(parsed);
         return null;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;

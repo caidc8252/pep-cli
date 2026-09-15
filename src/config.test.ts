@@ -1,5 +1,5 @@
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdtemp, readFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import * as configModule from "./config.js";
@@ -12,6 +12,8 @@ import {
   issuerForEnvironment,
   normalizeDocsUrl,
   normalizeIssuer,
+  projectSkillsTarget,
+  userSkillsTarget,
 } from "./config.js";
 
 // ⚠ 这一组钉的是「client_id 不再有『环境』这个维度」。
@@ -127,5 +129,53 @@ describe("DEFAULT_DOCS_URL", () => {
   // 否则「带参数」和「用默认」两条路会得到不同的 base，拼出来的路径也就不同。
   it("本身已是归一形态", () => {
     expect(normalizeDocsUrl(DEFAULT_DOCS_URL)).toBe(DEFAULT_DOCS_URL);
+  });
+});
+
+describe("落点：个人级 vs 项目级", () => {
+  // ⚠ 这两个路径不是我们定的，是 `npx skills` 那张 agent 表里的落点，照抄。对不上的后果是
+  // 铺进一个没有 agent 会去读的目录，而同步照样报成功 —— 一个不会自己暴露的错误。
+  it("个人级：~/.agents/skills 铺实体，~/.claude/skills 接链接", () => {
+    const target = userSkillsTarget();
+    expect(target.directory).toBe(join(homedir(), ".agents", "skills"));
+    expect(target.linkInto).toBe(join(homedir(), ".claude", "skills"));
+  });
+
+  it("项目级：同样的两个名字，只是根换成当前项目", () => {
+    expect(projectSkillsTarget("/work/app")).toEqual({
+      directory: join("/work/app", ".agents", "skills"),
+      linkInto: join("/work/app", ".claude", "skills"),
+    });
+  });
+
+  // 形状对称是有意的：个人级与项目级都是「一份实体 + 一条链接」，只有根不同。
+  // 哪天有人只给项目级加了一档特殊处理，这条会红。
+  it("两级形状一致 —— 都带链接，且尾段相同", () => {
+    const user = userSkillsTarget();
+    const project = projectSkillsTarget("/work/app");
+    const tail = (path: string) => path.split(/[/\\]/).slice(-2).join("/");
+    expect(tail(project.directory)).toBe(tail(user.directory));
+    expect(tail(project.linkInto as string)).toBe(tail(user.linkInto as string));
+  });
+
+  it("不给 cwd 时用当前工作目录", () => {
+    expect(projectSkillsTarget().directory).toBe(join(process.cwd(), ".agents", "skills"));
+  });
+});
+
+// ⚠ 版本号只有一个真源：package.json，由 `scripts/build-js.mjs` 在构建期注入。
+// 源码里手抄一份漂过一次（package.json 0.3.1 / cli.ts 0.3.0），表现是 `pep --version`
+// 报上一版 —— 排查线上问题的第一个问题就是「你装的是哪版」，那一步给了假话。
+describe("版本号不手抄", () => {
+  it("cli.ts 里没有写死的版本字面量", async () => {
+    const source = await readFile(new URL("./cli.ts", import.meta.url), "utf8");
+    expect(source).not.toMatch(/const VERSION = "\d+\.\d+\.\d+"/);
+    expect(source).toContain("__PEP_VERSION__");
+  });
+
+  it("构建脚本确实从 package.json 注入", async () => {
+    const script = await readFile(new URL("../scripts/build-js.mjs", import.meta.url), "utf8");
+    expect(script).toContain("__PEP_VERSION__");
+    expect(script).toContain("package.json");
   });
 });

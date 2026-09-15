@@ -83,6 +83,41 @@ departments to use now.
 back to `production` and publish immediately once that endpoint is live**: the issuer is baked in
 at build time, so releases already out in the wild cannot be repointed.
 
+## Skills
+
+```powershell
+pep skills add https://git.newlandpayment.com/group/sub/project   # or group/sub/project[@ref]
+pep skills list
+pep skills update                                                 # all of them
+pep skills update group/sub/project                               # just this one
+```
+
+PEP fetches the repository with its own read-only service account, so no GitLab credential ever
+reaches the machine. Only repositories on the platform's own GitLab host are accepted. One
+repository may hold several skills: every directory containing a `SKILL.md` becomes one, and
+`update` reports which of them actually changed rather than just that the repository moved.
+
+### Where skills are installed
+
+| Scope       | Flag        | Canonical copy            | Linked into                |
+| ----------- | ----------- | ------------------------- | -------------------------- |
+| **Personal**| (default)   | `~/.agents/skills/`       | `~/.claude/skills/`        |
+| **Project** | `--project` | `./.agents/skills/`       | `./.claude/skills/`        |
+| **Raw**     | `--dir <p>` | `<p>/`                    | nothing — linking skipped  |
+
+`~/.agents/skills` is the cross-agent convention that Codex, Cursor, Amp and ~20 others read
+directly; Claude Code keeps its own directory, so each skill is also linked there — one copy on
+disk, updated in one place. The project paths are the same two names rooted at the current
+directory, matching what `npx skills` installs at project scope.
+
+Personal is the default because the project directories get committed: whether a synced skill
+counts as a change, and whether to gitignore it, is a question every repository would otherwise
+have to answer. Use `--project` when the skills genuinely belong to one repository.
+
+**The location is remembered per repository.** A later `pep skills update` with no flags puts each
+repository back where it was. Passing `--project` or `--dir` to `update` *moves* that repository,
+and the copy in the old location is removed.
+
 `pep auth token` writes only the access token to stdout, so agents can use it without parsing status
 text. Refresh occurs automatically shortly before expiry and the rotated refresh token replaces the old
 credential atomically.

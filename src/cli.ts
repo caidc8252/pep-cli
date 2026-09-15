@@ -12,6 +12,9 @@ import {
   fileConfigStore,
   fileSkillsStateStore,
   normalizeDocsUrl,
+  projectSkillsTarget,
+  userSkillsTarget,
+  type SkillsTarget,
 } from "./config.js";
 import { systemCredentialStore } from "./credential-store.js";
 import { createOAuthClient } from "./oauth-client.js";
@@ -21,7 +24,9 @@ import { setupNexusCredential } from "./nexus-service.js";
 import { installedPackages, updateSkills, type SkillsUpdateResult } from "./skills-service.js";
 import type { CliConfig, ConfigStore } from "./types.js";
 
-const VERSION = "0.3.0";
+declare const __PEP_VERSION__: string | undefined;
+/** 构建期由 `scripts/build-js.mjs` 从 package.json 注入 —— 源码里不再抄一份，理由见那里。 */
+const VERSION = typeof __PEP_VERSION__ === "undefined" ? "0.0.0-dev" : __PEP_VERSION__;
 
 function usage(): string {
   return `PEP CLI ${VERSION}
@@ -32,8 +37,8 @@ Usage:
   pep auth token
   pep auth logout
   pep skills list
-  pep skills add <repo-url | group/project[@ref]> [--dir <path>]
-  pep skills update [<repo>...] [--dir <path>]
+  pep skills add <repo-url | group/project[@ref]> [--project | --dir <path>]
+  pep skills update [<repo>...] [--project | --dir <path>]
   pep docs list [--docs-url <url>]
   pep docs get <path> [--docs-url <url>]
   pep nexus setup
@@ -65,9 +70,18 @@ directly. Claude Code keeps its own directory, so each skill is also linked into
 ${claudeSkillsDirectory()} — one copy on disk, updated in one place. Where links are not
 available the skill is copied instead and the run says so.
 
+--project installs into the CURRENT PROJECT instead: ./.agents/skills plus the same link into
+./.claude/skills. Use it when the skills belong to one repository and should be committed with
+it; note both directories then show up in git status, which is why the personal location is the
+default.
+
 --dir <path> writes to that path ONLY and skips the linking, for an agent that reads neither
-directory. Either way sync only touches skills it wrote itself; anything you put there by
-hand is left alone.
+directory.
+
+Where a repository was installed is remembered per repository, so a later \`pep skills update\`
+puts it back in the same place with no flags. Passing --project or --dir to update MOVES it, and
+the copy in the old location is removed. Either way update only touches skills it wrote itself;
+anything you put there by hand is left alone.
 
 \`pep docs list\` prints the documents this account can read (path + description); feed a path
 straight to \`pep docs get\` to print that document as markdown on stdout. The documentation
@@ -128,6 +142,14 @@ function repeatedOption(args: string[], name: string): string[] {
   }
 }
 
+/** 摘一个布尔开关。给了就从 `args` 里拿掉，好让剩下的按位置参数处理。 */
+function flag(args: string[], name: string): boolean {
+  const index = args.indexOf(name);
+  if (index === -1) return false;
+  args.splice(index, 1);
+  return true;
+}
+
 function option(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
   if (index === -1) return undefined;
@@ -179,6 +201,74 @@ export async function loginConfig(
     redirectUri: DEFAULT_REDIRECT_URI,
     resources,
     ...(saved?.docsUrl !== undefined ? { docsUrl: saved.docsUrl } : {}),
+  };
+}
+
+/**
+ * `pep skills <command>` 的参数 → 「要哪几个包 + 铺到哪儿」。**纯函数，为的是可测**
+ * （`main` 那条路要先过钥匙串，linux 上根本跑不到这里）。
+ *
+ * ⚠ **选项必须先摘，位置参数后取。** 反过来做了半年：`update` 那侧先按「不以 `--` 开头」
+ * 捞位置参数，而 `--dir <path>` 的**值**恰好不以 `--` 开头，于是它被当成一个仓库名吃掉，
+ * `option()` 再去找就只剩一个光杆 `--dir` ——`pep skills update --dir <path>` 因此
+ * **无论怎么写都报「--dir requires a value.」**（2026-09-15 实测确认，钉在 cli.test.ts）。
+ */
+export function parseSkillsArgs(
+  command: "add" | "update" | "list",
+  args: string[],
+  cwd?: string,
+): { requested?: string; named: string[]; chosenTarget?: SkillsTarget } {
+  const explicitDirectory = command === "list" ? undefined : option(args, "--dir");
+  const project = command === "list" ? false : flag(args, "--project");
+  if (explicitDirectory !== undefined && project) {
+    // 两个都给 = 两个互相矛盾的落点。挑一个去执行等于替用户猜，而猜错是静默铺错地方。
+    throw new Error("--dir and --project cannot be used together: they name different places.");
+  }
+  // 选项摘完，剩下还以 `--` 开头的就是不认识的。
+  const unknownOption = args.find((one) => one.startsWith("--"));
+  if (unknownOption) throw new Error(`Unknown option: ${unknownOption}`);
+
+  // `add` 收恰好一个位置参数；`update` 收零个或多个（零个 = 全部已装的）；`list` 一个不收。
+  const requested = command === "add" ? args.shift() : undefined;
+  if (command === "add" && !requested) {
+    throw new Error("pep skills add needs a repository: a full https URL, or <group>/<project>.");
+  }
+  const named = command === "update" ? [...args] : [];
+  if (command !== "update" && args.length > 0) {
+    throw new Error(`Unexpected argument: ${args[0]}`);
+  }
+
+  // 本次**显式**指定的落点。`undefined` = 没指定，那时沿用账上记的（见 `targetForSource`）
+  // —— 这正是 v4 按包记落点换来的：`update` 不必再把 `--dir` / `--project` 重敲一遍。
+  //
+  // 显式 `--dir` = 「就铺到这儿，别的什么都别做」—— 给那些不读通用目录的 agent 用的逃生口，
+  // 所以那一档不接任何链接（接了反而会往用户没要求的地方写）。
+  const chosenTarget: SkillsTarget | undefined =
+    explicitDirectory !== undefined
+      ? { directory: explicitDirectory }
+      : project
+        ? projectSkillsTarget(cwd)
+        : undefined;
+
+  return { ...(requested !== undefined ? { requested } : {}), named, ...(chosenTarget ? { chosenTarget } : {}) };
+}
+
+/**
+ * 这一次把这个包铺到哪儿：**本次显式给的 > 账上记的 > 个人级默认**。
+ *
+ * ⚠ 中间那一档是 v4 的全部意义 —— 用 `--project` / `--dir` 装过的包，此后 `update` 不带
+ * 参数也回到原处。没有它的话（v3 就没有），一次 `update` 会把那些包**搬回**
+ * `~/.agents/skills`，而原处那份没人清。
+ */
+export function targetForSource(
+  chosen: SkillsTarget | undefined,
+  recorded: { directory: string; linkedInto?: string } | undefined,
+): SkillsTarget {
+  if (chosen) return chosen;
+  if (!recorded) return userSkillsTarget();
+  return {
+    directory: recorded.directory,
+    ...(recorded.linkedInto !== undefined ? { linkInto: recorded.linkedInto } : {}),
   };
 }
 
@@ -284,20 +374,7 @@ export async function main(): Promise<void> {
     if (command !== "update" && command !== "add" && command !== "list") {
       throw new Error(`Unknown skills command.\n\n${usage()}`);
     }
-    // `add` 的位置参数在选项摘掉之前取 —— 它紧跟命令，不会跟 `--dir` 的值混。
-    // `add` 收恰好一个；`update` 收零个或多个（零个 = 全部已装的）。
-    const requested = command === "add" ? args.shift() : undefined;
-    const named = command === "update" ? args.filter((one) => !one.startsWith("--")) : [];
-    for (const one of named) args.splice(args.indexOf(one), 1);
-    if (command === "add" && !requested) {
-      throw new Error("pep skills add needs a repository: a full https URL, or <group>/<project>.");
-    }
-
-    // 显式 `--dir` = 「就铺到这儿，别的什么都别做」—— 给那些不读通用目录的 agent 用的逃生口，
-    // 所以那一档不接任何链接（接了反而会往用户没要求的地方写）。
-    const explicitDirectory = command === "list" ? undefined : option(args, "--dir");
-    const directory = explicitDirectory ?? defaultSkillsDirectory();
-    if (args.length > 0) throw new Error(`Unknown option: ${args[0]}`);
+    const { requested, named, chosenTarget } = parseSkillsArgs(command, args);
 
     // currentAuthorization 会在令牌快过期时先刷新 —— 同步是一次可能不短的下载，拿一枚
     // 马上就到期的令牌出门没有意义。
@@ -336,12 +413,14 @@ export async function main(): Promise<void> {
       );
     }
 
+    const state = await stateStore.read();
     for (const source of targets) {
+      const target = targetForSource(chosenTarget, state?.packages[source]);
       const result = await updateSkills({
         ...remote,
         source,
-        directory,
-        ...(explicitDirectory === undefined ? { linkInto: claudeSkillsDirectory() } : {}),
+        directory: target.directory,
+        ...(target.linkInto !== undefined ? { linkInto: target.linkInto } : {}),
         stateStore,
       });
       reportUpdate(result);
