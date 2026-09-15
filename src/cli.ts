@@ -89,8 +89,10 @@ list. It only removes what it installed itself, and it needs no login. A skill t
 repository also installs is left on disk (which copy it is can no longer be told) and reported.
 
 Two repositories cannot both provide a skill with the SAME NAME in one directory — the skill name
-is the folder name inside the repository, so they would overwrite each other. Adding a second one
-is refused; if you already have such a pair, every command says so until you remove one.
+is the folder name inside the repository, so they would overwrite each other. add refuses, naming
+the repository already there. update never fails over it: it leaves that one skill untouched,
+refreshes everything else, and reports it every run until you remove one. Installing them into
+different directories (-p, or --dir) is fine.
 
 Delete a skill folder by hand and update LEAVES IT DELETED — it refreshes what is still there and
 reports the ones it left alone. Run \`pep skills add <repo>\` to put them back; add is the command

@@ -153,9 +153,12 @@ A skill's name is the folder name **inside** the repository, not the repository'
 different repositories that each ship a `semi-integration/SKILL.md` both want
 `~/.agents/skills/semi-integration/`, and the second would silently overwrite the first.
 
-Adding a second such repository is refused, and the error names the one already there. If you
-already have a colliding pair from an older version, nothing breaks — every command reports it
-until you `remove` one:
+`add` refuses, and the error names the repository already there — it will not pick a winner for
+you. `update` never fails over it: the contested skill is left exactly as it is, everything else in
+that repository still refreshes, and the clash is reported every run until you `remove` one. That
+matters because a clash can appear **later**, when one repository adds a folder the other already
+has — you did nothing, and one upstream mistake must not stop every other repository from
+updating.
 
 ```
 ⚠ 3 repositories all install "semi-integration" here:
@@ -165,6 +168,9 @@ until you `remove` one:
 ```
 
 Installing them into **different** directories is fine — that is what `-p` is for.
+
+A contested skill stays frozen at whichever copy is on disk until you remove one of the claimants.
+That is deliberate: stable and loudly reported beats "whoever runs update last wins".
 
 `remove` leaves a shared skill's files on disk (which copy it is can no longer be told) and says
 so, rather than deleting what might be the other repository's content.

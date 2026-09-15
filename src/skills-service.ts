@@ -440,7 +440,37 @@ export async function updateSkills(
   const skipped = dependencies.restoreMissing
     ? []
     : inArchive.filter((skill) => gone.has(skill));
-  const skills = inArchive.filter((skill) => !skipped.includes(skill));
+  const candidates = inArchive.filter((skill) => !skipped.includes(skill));
+
+  // ── 跨包同名：`add` 抛，`update` 让开 ──────────────────────────────────────
+  // skill 名就是落盘的目录名，所以同一个目录下两个仓给出同名 skill 时后写的盖掉先写的
+  // —— 与包内同名是同一件事（见 `planSkillFiles` 那段注释），只是这次两个名字来自两个仓。
+  //
+  // ⚠ **两条命令的态度必须不同**：
+  //   · `add` 是一次显式的「我要装这个」⇒ **抛**。让它装进去等于替用户挑一个赢家，
+  //     而挑错是静默的。报错里指名是谁占着、怎么绕开。
+  //   · `update` 是一次例行刷新 ⇒ **绝不抛、也绝不覆盖**。撞名可能是**上游后来才造成的**
+  //     （B 仓新增了一个 A 仓已有的名字），用户什么都没做错；抛出去会让整条
+  //     `pep skills update` 当场中断，后面那些仓一个都刷不到。于是让开：不写这一个，
+  //     照常写别的，并把它报上去。
+  //
+  // 让开的后果是这个 skill 被冻在原处，直到用户 `remove` 掉一边 —— 那正是该有的压力：
+  // 内容稳定、每次都被说出来、解法明确，而不是谁最后 update 谁赢。
+  const conflicts: SkillConflict[] = [];
+  for (const skill of candidates) {
+    const owner = claimedElsewhere(skill);
+    if (owner === undefined) continue;
+    if (dependencies.restoreMissing) {
+      throw new Error(
+        `${owner} already installs a skill named "${skill}" in ${dependencies.directory}. ` +
+          `Two repositories cannot both provide "${skill}" there — the second would silently ` +
+          `overwrite the first. Install this one elsewhere (-p, or --dir <path>), ` +
+          `or run \`pep skills remove ${owner}\` first.`,
+      );
+    }
+    conflicts.push({ skill, owner });
+  }
+  const skills = candidates.filter((skill) => !conflicts.some((one) => one.skill === skill));
 
   // 逐个比哈希。⚠ 上次记的是空串（从旧版账迁过来、哈希未知）时一律算「变了」——
   // 把「不知道」说成「没变」会让迁移后的第一次 update 漏掉真正的更新。
@@ -456,31 +486,6 @@ export async function updateSkills(
     if (gone.has(skill)) updated.push(skill);
     else if (before !== undefined && before !== "" && before === hash) unchanged.push(skill);
     else updated.push(skill);
-  }
-
-  // ── 跨包同名：新撞的抛，存量的放行但要汇报 ──────────────────────────────────
-  // ⚠ 与包内同名同一个道理（见 `planSkillFiles` 那段注释），只是这次两个名字来自两个仓：
-  // 后写的盖掉先写的，而两边的账都认为那个目录是自己的 —— 于是谁先 update 谁就赢，
-  // 上游哪天删掉它，清理还会把另一份一起删了。静默，所以必须抛。
-  //
-  // ⚠ **存量的只汇报不抛**：加这道检查时用户账上可能已经撞着了（我们自己就有三条），
-  // 直接抛等于给他一个解不开的错 —— 那会让 `update` 从此跑不动，而唯一的出路
-  // `skills remove` 是同一版才有的。判据是「这个名字**以前就记在我自己账上**」：
-  // 记过 = 装这一版之前就撞了，没记过 = 这一次新撞的。
-  const conflicts: SkillConflict[] = [];
-  for (const skill of skills) {
-    const owner = claimedElsewhere(skill);
-    if (owner === undefined) continue;
-    if (previous !== undefined && skill in previous.skills) {
-      conflicts.push({ skill, owner });
-      continue;
-    }
-    throw new Error(
-      `${owner} already installs a skill named "${skill}" in ${dependencies.directory}. ` +
-        `Two repositories cannot both provide "${skill}" there — the second would silently ` +
-        `overwrite the first. Install this one elsewhere (-p, or --dir <path>), ` +
-        `or run \`pep skills remove ${owner}\` first.`,
-    );
   }
 
   // ── 先按**旧账**清一遍 ──────────────────────────────────────────────────────
@@ -506,10 +511,11 @@ export async function updateSkills(
   for (const skill of skills) {
     await rm(join(dependencies.directory, skill), { recursive: true, force: true });
   }
+  // ⚠ 不碰的那几个（用户删掉的 + 让给别的包的）**一个文件都不写**。只过滤 `skills` 而不过滤
+  // 这里的话，目录照样被重建出来 ——「不复活」「不覆盖」就都成了空话。这条踩过两次了。
+  const untouched = new Set([...skipped, ...conflicts.map((one) => one.skill)]);
   for (const file of files) {
-    // ⚠ 跳过的那几个一个文件都不写 —— 只过滤 `skills` 而不过滤这里的话，目录照样被重建出来，
-    // 「不复活」就成了一句空话。
-    if (skipped.includes(file.skill)) continue;
+    if (untouched.has(file.skill)) continue;
     const target = join(dependencies.directory, file.skill, ...file.path.split("/"));
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, file.data);
@@ -539,7 +545,12 @@ export async function updateSkills(
         ...(dependencies.linkInto !== undefined ? { linkedInto: dependencies.linkInto } : {}),
         // 跳过的那些**原样留着上次的哈希** —— 账上仍然认它是这个包的（将来 add 能补回来，
         // 上游删掉时也还清得动），只是这次没去碰它。
-        skills: { ...pickSkipped(previous, skipped), ...hashes },
+        // 跳过的与让开的都**原样留着上次的哈希** —— 账上仍然认它是这个包的（将来 add
+        // 能补回来、`remove` 也还清得动），只是这次没去碰它。
+        skills: {
+          ...pickSkipped(previous, [...skipped, ...conflicts.map((one) => one.skill)]),
+          ...hashes,
+        },
       },
     },
   });

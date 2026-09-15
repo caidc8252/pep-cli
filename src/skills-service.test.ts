@@ -733,37 +733,89 @@ describe("跨包同名", () => {
       deps(vi.fn().mockResolvedValue(skillNamed("我是 A", "a".repeat(40))), store, {}),
     );
 
-  it("新撞上的 ⇒ 抛，一个字节都不写", async () => {
+  // ── add：抛 ────────────────────────────────────────────────────────────────
+  // 显式的「我要装这个」。让它装进去等于替用户挑一个赢家，而挑错是静默的。
+  it("add 撞上 ⇒ 抛，一个字节都不写", async () => {
     const store = memoryStateStore();
-    await updateSkills({ ...deps(vi.fn().mockResolvedValue(skillNamed("我是 A", "a".repeat(40))), store), source: "group/repo-a" });
+    await updateSkills({
+      ...deps(vi.fn().mockResolvedValue(skillNamed("我是 A", "a".repeat(40))), store, {
+        restoreMissing: true,
+      }),
+      source: "group/repo-a",
+    });
 
     await expect(
       updateSkills({
-        ...deps(vi.fn().mockResolvedValue(skillNamed("我是 B", "b".repeat(40))), store),
+        ...deps(vi.fn().mockResolvedValue(skillNamed("我是 B", "b".repeat(40))), store, {
+          restoreMissing: true,
+        }),
         source: "group/repo-b",
       }),
     ).rejects.toThrow(/group\/repo-a already installs a skill named "semi-integration"/);
 
     // 抛之前什么都没写：A 的内容原封不动。
     expect(await readFile(join(directory, "semi-integration", "SKILL.md"), "utf8")).toBe("我是 A");
+    // 账上也不该留下 B 的痕迹。
+    expect(store.current?.packages["group/repo-b"]).toBeUndefined();
   });
 
   it("报错里给得出出路（装到别处，或者先 remove）", async () => {
     const store = memoryStateStore();
-    await updateSkills({ ...deps(vi.fn().mockResolvedValue(skillNamed("A", "a".repeat(40))), store), source: "group/repo-a" });
+    await updateSkills({ ...deps(vi.fn().mockResolvedValue(skillNamed("A", "a".repeat(40))), store, { restoreMissing: true }), source: "group/repo-a" });
     await expect(
-      updateSkills({ ...deps(vi.fn().mockResolvedValue(skillNamed("B", "b".repeat(40))), store), source: "group/repo-b" }),
+      updateSkills({ ...deps(vi.fn().mockResolvedValue(skillNamed("B", "b".repeat(40))), store, { restoreMissing: true }), source: "group/repo-b" }),
     ).rejects.toThrow(/--dir <path>.*pep skills remove group\/repo-a/s);
+  });
+
+  // ── update：让开，绝不抛 ───────────────────────────────────────────────────
+  // ⚠ 撞名可能是**上游后来才造成的**（B 仓新增了一个 A 仓已有的名字），用户什么都没做错。
+  // 抛出去会让整条 `pep skills update` 当场中断，后面那些仓一个都刷不到。
+  it("update 撞上 ⇒ 不抛、不覆盖，照常刷别的，并把它报上去", async () => {
+    const store = memoryStateStore();
+    await updateSkills({
+      ...deps(vi.fn().mockResolvedValue(skillNamed("A 的", "a".repeat(40))), store),
+      source: "repo-a",
+    });
+    await updateSkills({
+      ...deps(
+        vi.fn().mockResolvedValue(archiveResponse({ [`${ROOT}/only-b/SKILL.md`]: "B 的" }, "b".repeat(40))),
+        store,
+      ),
+      source: "repo-b",
+    });
+
+    // B 的上游这时新增了一个也叫 semi-integration 的 skill。
+    const later = archiveResponse(
+      { [`${ROOT}/only-b/SKILL.md`]: "B 的 v2", [`${ROOT}/semi-integration/SKILL.md`]: "B 抢的" },
+      "c".repeat(40),
+    );
+    const result = await updateSkills({
+      ...deps(vi.fn().mockResolvedValue(later), store),
+      source: "repo-b",
+    });
+
+    expect(result).toMatchObject({
+      status: "written",
+      updated: ["only-b"],
+      conflicts: [{ skill: "semi-integration", owner: "repo-a" }],
+    });
+    // A 的那份原封不动 —— 让开的意思就是不碰。
+    expect(await readFile(join(directory, "semi-integration", "SKILL.md"), "utf8")).toBe("A 的");
+    // 而 B 自己的那个照常刷到了最新。
+    expect(await readFile(join(directory, "only-b", "SKILL.md"), "utf8")).toBe("B 的 v2");
   });
 
   // ⚠ 落点不同就不算撞 —— 一个装个人级一个装项目级，本来互不相干。
   it("两个包装在不同目录 ⇒ 不算撞，照装", async () => {
     const elsewhere = await mkdtemp(join(tmpdir(), "pep-other-"));
     const store = memoryStateStore();
-    await updateSkills({ ...deps(vi.fn().mockResolvedValue(skillNamed("A", "a".repeat(40))), store), source: "group/repo-a" });
+    await updateSkills({ ...deps(vi.fn().mockResolvedValue(skillNamed("A", "a".repeat(40))), store, { restoreMissing: true }), source: "group/repo-a" });
 
     const b = await updateSkills({
-      ...deps(vi.fn().mockResolvedValue(skillNamed("B", "b".repeat(40))), store, { directory: elsewhere }),
+      ...deps(vi.fn().mockResolvedValue(skillNamed("B", "b".repeat(40))), store, {
+        directory: elsewhere,
+        restoreMissing: true,
+      }),
       source: "group/repo-b",
     });
 
