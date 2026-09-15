@@ -114,18 +114,27 @@ declare const __PEP_BUILD_ENVIRONMENT__: BuildEnvironment | undefined;
  * 构建环境 → issuer。**issuer 在构建期固化**，`--issuer` 只覆盖当次、不被记住，
  * 所以这个默认值决定了绝大多数用户实际打到哪里。
  *
- * **发布到 npm 的那一版走 `production`**（见 package.json 的 `prepack`）—— 与 Stripe 一类
- * 客户端同一口径：包里只内置生产地址，内部环境靠参数指过去。这样地址变更不需要重发包。
+ * ── 发布到 npm 的那一版烘 `development`（操作员 2026-09-15 裁定）────────────────────
+ * 即 `https://pep-webapp-dev.onrender.com`，见 package.json 的 `prepack`。**这是一个明确的
+ * 临时状态**，定它的理由是：近期不上生产，这一版是发给其他部门的人**现在就用**的。
  *
- * ⚠ **2026-09-09 实测生产上还没有授权服务器**：`https://pep.newlandnpt.us` 站点本身活着
+ * 这推翻了 2026-09-09 的取舍（当时定的是「宁可烘对的地址、等生产补齐」，`prepack` 走
+ * `production`）。推翻它的是 0.3.0 发出去之后的实际后果：包里烘的是
+ * `https://pep.newlandnpt.us`，而那台机器至今没有授权服务器 —— 2026-09-09 实测站点本身活着
  * （307），但 `/.well-known/openid-configuration`、`/api/oauth/openid-configuration`、
- * `/api/oauth/jwks` 全部 **404**，而 view 上同一条路径 200。`DISCOVERY` 这个 handler 不看
- * 任何配置，所以那不是缺配置，是生产跑的构建里根本没有授权服务器模块。
- * ⇒ 在生产补上之前，**默认的 `pep auth login` 会在 discovery 那一步失败**；演示要带
- * `--issuer https://pep-webapp-view.onrender.com` —— **每次 login 都要带**（2026-09-10 起
- * 不再记住，理由见 `configuredIssuer` 的沿革）。
- * 这是操作员 2026-09-09 的明确取舍：宁可现在烘对的地址、等生产补齐，也不要为了当下能跑
- * 而烘一个将来必须重发包才能改掉的测试地址。
+ * `/api/oauth/jwks` 全部 **404**（`DISCOVERY` 这个 handler 不看任何配置，所以那不是缺配置，
+ * 是生产跑的构建里根本没有授权服务器模块）。于是**默认的 `pep auth login` 在 discovery 那步
+ * 就失败**，每个人都得带 `--issuer`，而 2026-09-10 起它不再被记住 ⇒ **每次 login 都要带**。
+ * 对一批只想装上就用的人，这等于包是坏的。
+ *
+ * ⚠ **代价与撤销条件都记在这里**：地址烘在构建期，所以生产上线之后**改不掉已发出去的包**，
+ * 只能重发一版。⇒ 生产的 `/.well-known/openid-configuration` 一旦回 200，就把 `prepack`
+ * 改回 `production` 并**立即发一版**；在那之前发出去的每一版都只会打 dev。
+ *
+ * ⚠ dev 与 view / 生产是**各自独立的部署、各自独立的库**，而 PEP 的令牌是不透明的（靠查
+ * `oauth_token` 表验，不是验签）。所以 dev 签出来的令牌拿到别的部署去内省一律
+ * `{"active":false}` —— 文档平台的 `PEP_OIDC_ISSUER` 若指着 view，`pep docs` 就会 401，
+ * 而 `skills` / `nexus` 不受影响（它们直接打 dev，中间没有第三方）。
  */
 export function issuerForEnvironment(environment: BuildEnvironment): string {
   if (environment === "production") return "https://pep.newlandnpt.us";

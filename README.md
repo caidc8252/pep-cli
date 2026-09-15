@@ -72,11 +72,16 @@ The issuer is fixed at build time:
 `--issuer` remains available only as a temporary override — it is **not** remembered, so every
 `auth login` needs it again. That is why the built-in default decides where most users land.
 
-⚠ **The npm release is built from `view`** (see `prepublishOnly`). As of 2026-09-08
-`https://pep.newlandnpt.us/.well-known/openid-configuration` returns **404** — the production
-domain does not serve the authorization server yet, so a `production` build would fail at
-discovery on the user's very first `auth login`. Switch `prepublishOnly` back to `production`
-once that endpoint is live.
+⚠ **The npm release is currently built from `development`** — it ships
+`https://pep-webapp-dev.onrender.com` (see `prepack` in `package.json`). This is a deliberate
+temporary state: production is not going live in the near term and this build is for other
+departments to use now.
+
+`https://pep.newlandnpt.us/.well-known/openid-configuration` still returns **404** (last checked
+2026-09-09) — the production domain does not serve the authorization server yet, so a
+`production` build fails at discovery on the user's very first `auth login`. **Switch `prepack`
+back to `production` and publish immediately once that endpoint is live**: the issuer is baked in
+at build time, so releases already out in the wild cannot be repointed.
 
 `pep auth token` writes only the access token to stdout, so agents can use it without parsing status
 text. Refresh occurs automatically shortly before expiry and the rotated refresh token replaces the old
