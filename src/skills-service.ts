@@ -28,6 +28,8 @@ export type SkillsUpdateResult =
       skills: string[];
       fileCount: number;
       removed: string[];
+      /** 账上有、盘上已被用户删掉，因而这次**没去碰**的那些（只有 `update` 会有）。 */
+      skipped: string[];
       directory: string;
       /** 接进了哪个 agent 目录（`--dir` 显式指定时不接，为 undefined）。 */
       linkedInto?: string;
@@ -130,6 +132,14 @@ export type SkillsUpdateDependencies = {
    * `undefined` = 调用方给了 `--dir`，那时只铺一份、不接任何链接。
    */
   linkInto?: string;
+  /**
+   * 盘上已经没了的那些 skill：**补回来（`add`）还是照旧不管（`update`）**。
+   *
+   * 操作员 2026-09-15 定的口径：删掉就是删掉。`update` 的职责是「把还在的刷到最新」，
+   * 它不复活用户自己删掉的东西；要它回来就显式 `add` 一次 —— 那才是「装上」这个动作的
+   * 出口。于是 `add` 传 true，`update` 不传。
+   */
+  restoreMissing?: boolean;
   stateStore: SkillsStateStore;
   fetch?: typeof globalThis.fetch;
 };
@@ -256,26 +266,32 @@ function hashSkill(files: readonly SkillFile[]): string {
  * 「本地被人手改过却报 unchanged」这种查不出的状态 —— 不值。
  */
 /**
- * 账上记着的那些 skill，盘上是不是**真的都还在**。
+ * 账上记着、但盘上**已经不在**的那些 —— 也就是「用户自己删掉的」。
  *
- * 只核「在不在」，不核内容 —— 内容对不对由哈希在取下来之后回答。这里要的只是把快路的
- * 前提从「账上说是这一版」变成「盘上也确实有」，因为前者在用户手工删文件之后依然成立。
+ * 只核 canonical 那一份的在否，不核内容。判据落在 canonical 而不是链接上：链接是
+ * 「已安装」的实现细节，用户要扔掉一个 skill 时扔的是实体那份。
  *
- * ⚠ 用 `stat` 而不是 `lstat`：它跟随符号链接，于是**悬空的链接算「不在」**。canonical
- * 被删而链接还挂着时正是这个形状，那时必须重铺。
+ * ⚠ 用 `stat` 而不是 `lstat`：它跟随符号链接，于是**悬空的链接算「不在」**。
  */
-async function allPresent(
+/** 跳过的那几个在账上的原记录 —— 原样留着，见调用点。 */
+function pickSkipped(
+  previous: { skills: Record<string, string> } | undefined,
+  skipped: readonly string[],
+): Record<string, string> {
+  return Object.fromEntries(
+    skipped.map((skill) => [skill, previous?.skills[skill] ?? ""]),
+  );
+}
+
+async function missingSkills(
   directory: string,
   skills: string[],
-  linkedInto: string | undefined,
-): Promise<boolean> {
+): Promise<ReadonlySet<string>> {
+  const gone = new Set<string>();
   for (const skill of skills) {
-    if (!(await stat(join(directory, skill)).catch(() => null))) return false;
-    if (linkedInto !== undefined && !(await stat(join(linkedInto, skill)).catch(() => null))) {
-      return false;
-    }
+    if (!(await stat(join(directory, skill)).catch(() => null))) gone.add(skill);
   }
-  return true;
+  return gone;
 }
 
 export async function updateSkills(
@@ -302,16 +318,17 @@ export async function updateSkills(
   const sameTarget =
     previous?.directory === dependencies.directory &&
     previous?.linkedInto === dependencies.linkInto;
-  // ⚠ **还要核一遍盘上那份真的在。** 账本答不了这件事：用户手工删掉一个 skill 目录之后
-  // 账本一个字都不会变，于是快路会答「unchanged」然后什么都不做 —— 而 `add` 走的是同一个
-  // 函数、同一条快路，**重新 add 也补不回来**，除了手工改账本没有别的出路。
-  // （2026-09-15 补。此前只比 commit + 落点，那两样说的都是「我上次干了什么」，
-  // 没有一样说得出「现在盘上是什么」。）
-  const intact =
-    sameTarget &&
-    previous !== undefined &&
-    (await allPresent(previous.directory, Object.keys(previous.skills), previous.linkedInto));
-  if (commit !== undefined && commit === previous?.commit && intact) {
+  // 账上记着、盘上已经没了的那些 —— 用户自己删掉的。**两条命令对它的态度相反**，见
+  // `restoreMissing` 的注释。
+  const gone =
+    previous !== undefined && sameTarget
+      ? await missingSkills(previous.directory, Object.keys(previous.skills))
+      : new Set<string>();
+
+  // ⚠ `add` 在**有东西被删掉**时不许走快路 —— 它的职责就是把那些补回来。`update` 则照走：
+  // 删掉的东西它本来就不该复活。
+  const nothingToRestore = !dependencies.restoreMissing || gone.size === 0;
+  if (commit !== undefined && commit === previous?.commit && sameTarget && nothingToRestore) {
     // 已经是这一版了。体还没读完就掐掉，省下传输 —— 这是个半吊子的省法，真要省该是
     // 条件请求（CLI 带 If-None-Match、PEP 答 304），但 PEP 那侧还没做。
     await response.body?.cancel();
@@ -327,7 +344,18 @@ export async function updateSkills(
     if (group) group.push(file);
     else bySkill.set(file.skill, [file]);
   }
-  const skills = [...bySkill.keys()].sort();
+  const inArchive = [...bySkill.keys()].sort();
+
+  // ── 用户删掉的那些，`update` 不复活 ────────────────────────────────────────
+  // 操作员 2026-09-15 定的口径：**删掉就是删掉**。`update` 的职责是「把还在的刷到最新」，
+  // 不是「把仓里有的都铺满」—— 后者是 `add` 的职责，要它回来就显式 add 一次。
+  //
+  // ⚠ 判据是「**以前记过、现在没了**」，不能简单写成「盘上没有就跳过」：上游**新增**的
+  // skill 盘上本来就没有，那种一律要装 —— 那正是 update 存在的理由。
+  const skipped = dependencies.restoreMissing
+    ? []
+    : inArchive.filter((skill) => gone.has(skill));
+  const skills = inArchive.filter((skill) => !skipped.includes(skill));
 
   // 逐个比哈希。⚠ 上次记的是空串（从旧版账迁过来、哈希未知）时一律算「变了」——
   // 把「不知道」说成「没变」会让迁移后的第一次 update 漏掉真正的更新。
@@ -338,7 +366,10 @@ export async function updateSkills(
     const hash = hashSkill(bySkill.get(skill) as SkillFile[]);
     hashes[skill] = hash;
     const before = previous?.skills[skill];
-    if (before !== undefined && before !== "" && before === hash) unchanged.push(skill);
+    // ⚠ 被删掉又补回来的算 **updated** —— 它盘上确实从「没有」变成了「有」。只比哈希的话
+    // 内容没变就会报成 unchanged，而用户刚眼看着它回来，那句话是假的。
+    if (gone.has(skill)) updated.push(skill);
+    else if (before !== undefined && before !== "" && before === hash) unchanged.push(skill);
     else updated.push(skill);
   }
 
@@ -347,7 +378,9 @@ export async function updateSkills(
   //
   // ⚠ 必须赶在写新的之前做完。落点没变、只是链接目录变了时，旧 canonical 就是新 canonical
   // ——放到写完之后清，会把刚写好的那份删掉。
-  const removed = Object.keys(previous?.skills ?? {}).filter((skill) => !skills.includes(skill));
+  // ⚠ 「上游删掉的」要拿**归档里有什么**去比，不能拿这次要写的那批 —— 后者已经把用户
+  // 自己删掉的剔出去了，混用会把它们当成上游删的，于是账上也跟着抹掉。
+  const removed = Object.keys(previous?.skills ?? {}).filter((skill) => !inArchive.includes(skill));
   if (previous !== undefined) {
     const stale = sameTarget ? removed : Object.keys(previous.skills);
     for (const skill of stale) {
@@ -364,6 +397,9 @@ export async function updateSkills(
     await rm(join(dependencies.directory, skill), { recursive: true, force: true });
   }
   for (const file of files) {
+    // ⚠ 跳过的那几个一个文件都不写 —— 只过滤 `skills` 而不过滤这里的话，目录照样被重建出来，
+    // 「不复活」就成了一句空话。
+    if (skipped.includes(file.skill)) continue;
     const target = join(dependencies.directory, file.skill, ...file.path.split("/"));
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, file.data);
@@ -391,7 +427,9 @@ export async function updateSkills(
         ...(commit ? { commit } : {}),
         directory: dependencies.directory,
         ...(dependencies.linkInto !== undefined ? { linkedInto: dependencies.linkInto } : {}),
-        skills: hashes,
+        // 跳过的那些**原样留着上次的哈希** —— 账上仍然认它是这个包的（将来 add 能补回来，
+        // 上游删掉时也还清得动），只是这次没去碰它。
+        skills: { ...pickSkipped(previous, skipped), ...hashes },
       },
     },
   });
@@ -402,8 +440,9 @@ export async function updateSkills(
     updated,
     unchanged,
     skills,
-    fileCount: files.length,
+    fileCount: files.filter((one) => !skipped.includes(one.skill)).length,
     removed,
+    skipped,
     directory: dependencies.directory,
     ...(dependencies.linkInto !== undefined ? { linkedInto: dependencies.linkInto } : {}),
     ...(copiedCount > 0 ? { copiedCount } : {}),

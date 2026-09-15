@@ -83,8 +83,10 @@ it already lives and never moves anything. On update, -p and --dir instead NARRO
 repositories installed there: \`pep skills update -p\` refreshes only this project's, and reports
 nothing to do when the project has none. To move a repository, add it again with the new flag —
 add is where the location is decided, and the copy in the old location is then removed.
-Deleting a skill folder by hand is fine: update notices it is gone and writes it again.
-Either way update only touches skills it wrote itself; anything you put there by hand is left alone.
+Delete a skill folder by hand and update LEAVES IT DELETED — it refreshes what is still there and
+reports the ones it left alone. Run \`pep skills add <repo>\` to put them back; add is the command
+that installs. Either way update only touches skills it wrote itself; anything you put there by
+hand is left alone.
 
 \`pep docs list\` prints the documents this account can read (path + description); feed a path
 straight to \`pep docs get\` to print that document as markdown on stdout. The documentation
@@ -116,6 +118,12 @@ function reportUpdate(result: SkillsUpdateResult): void {
   );
   if (result.unchanged.length > 0) {
     console.log(`  unchanged: ${result.unchanged.join(" ")}`);
+  }
+  // ⚠ 跳过的必须说出来，而且要说清**怎么让它回来** —— 否则「我明明 update 了，它怎么还
+  // 没有」这件事，命令行上一点线索都没有。
+  if (result.skipped.length > 0) {
+    console.log(`  deleted locally, left alone: ${result.skipped.join(" ")}`);
+    console.log(`  (\`pep skills add ${result.name}\` puts them back)`);
   }
   console.log(`  ${result.fileCount} file(s) in ${result.directory}`);
   if (result.linkedInto !== undefined) {
@@ -417,13 +425,14 @@ export async function main(): Promise<void> {
     const state = await stateStore.read();
     const installed = Object.keys(state?.packages ?? {}).sort();
 
-    const run = async (source: string, target: SkillsTarget) =>
+    const run = async (source: string, target: SkillsTarget, restoreMissing = false) =>
       reportUpdate(
         await updateSkills({
           ...remote,
           source,
           directory: target.directory,
           ...(target.linkInto !== undefined ? { linkInto: target.linkInto } : {}),
+          ...(restoreMissing ? { restoreMissing: true } : {}),
           stateStore,
         }),
       );
@@ -431,7 +440,14 @@ export async function main(): Promise<void> {
     if (command === "add") {
       // `add` 是「**放哪儿**」这个决定的唯一出口：本次显式给的赢，没给就沿用账上记的
       // （重复 add 同一个仓不会把它搬走），再没有就个人级默认。
-      await run(requested as string, targetForSource(chosenTarget, state?.packages[requested as string]));
+      //
+      // ⚠ 它也是「**装上**」这个动作的唯一出口：盘上被删掉的那些由它补回来
+      // （`restoreMissing`），`update` 不管 —— 见那个字段的注释。
+      await run(
+        requested as string,
+        targetForSource(chosenTarget, state?.packages[requested as string]),
+        true,
+      );
       return;
     }
 

@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -80,7 +80,7 @@ beforeEach(async () => {
 const deps = (
   fetchImpl: unknown,
   stateStore: SkillsStateStore,
-  overrides: { directory?: string; linkInto?: string } = {},
+  overrides: { directory?: string; linkInto?: string; restoreMissing?: boolean } = {},
 ) => ({
   issuer: "https://pep.example.com",
   accessToken: "tok",
@@ -250,6 +250,9 @@ describe("updateSkills —— 落盘", () => {
   it("上一次写过、这次没有了的 skill 被移除", async () => {
     await mkdir(join(directory, "gone"), { recursive: true });
     await writeFile(join(directory, "gone", "SKILL.md"), "旧的");
+    // ⚠ `a` 也得在盘上。不在的话它会被当成「用户自己删的」而跳过，这条用例就测不到
+    // 它本来要测的东西了（上游删掉的 gone 被移除）。
+    await alreadyOnDisk(directory, "a");
     const fetchImpl = vi
       .fn()
       .mockResolvedValue(
@@ -458,6 +461,9 @@ describe("updateSkills —— 哪些 skill 真的变了", () => {
       version: 4,
       packages: { "group/sub/repo": { commit: "old", directory, skills: { a: "", b: "" } } },
     });
+    // 两个都得在盘上 —— 否则会被当成「用户自己删的」而跳过，测不到哈希那一档。
+    await alreadyOnDisk(directory, "a");
+    await alreadyOnDisk(directory, "b");
     const result = await updateSkills(
       deps(vi.fn().mockResolvedValue(archive("# a", "# b")), store),
     );
@@ -599,40 +605,113 @@ describe("落点变了 ⇒ 旧处那份清掉", () => {
 //
 // 「我把 ~/.agents/skills/xxx 删了，再 update 一下能回来吗」—— 这是个常见动作
 // （清理、试错、手滑）。快路的前提是「盘上已经正好是这一版」，而账本答不了这件事。
-describe("盘上那份被删了 ⇒ update 要能补回来", () => {
-  const archiveOf = () => archiveResponse({ [`${ROOT}/skills/a/SKILL.md`]: "# a" });
-
-  it("commit 没变，但盘上那份被删了 ⇒ 重新铺出来", async () => {
-    // 账上记着装过，盘上却什么都没有 —— 正是「手工删掉」之后的样子。
-    const store = memoryStateStore({
-      version: 4,
-      packages: { "group/sub/repo": { commit: COMMIT, directory, skills: { a: "h" } } },
-    });
-    expect(await readdir(directory)).toEqual([]);
-
-    const result = await updateSkills(deps(vi.fn().mockResolvedValue(archiveOf()), store));
-
-    expect(result.status).toBe("written");
-    expect(await readFile(join(directory, "a", "SKILL.md"), "utf8")).toBe("# a");
-  });
-
-  it("canonical 还在、只有链接那份被删了 ⇒ 链接补回来", async () => {
-    const link = await mkdtemp(join(tmpdir(), "pep-link-"));
-    await mkdir(join(directory, "a"), { recursive: true });
-    await writeFile(join(directory, "a", "SKILL.md"), "# a");
-    const store = memoryStateStore({
-      version: 4,
-      packages: {
-        "group/sub/repo": { commit: COMMIT, directory, linkedInto: link, skills: { a: "h" } },
-      },
-    });
-    expect(await readdir(link)).toEqual([]);
-
-    const result = await updateSkills(
-      deps(vi.fn().mockResolvedValue(archiveOf()), store, { linkInto: link }),
+// ⚠ **删掉就是删掉**（操作员 2026-09-15 定的口径）。`update` 的职责是「把还在的刷到最新」，
+// 不是「把仓里有的都铺满」—— 后者是 `add` 的职责。两条命令走同一个 `updateSkills`，
+// 分歧只在 `restoreMissing` 这一个开关上，所以这一组是它唯一的说明书。
+describe("盘上那份被用户删了", () => {
+  const archiveOf = (commit?: string) =>
+    archiveResponse(
+      { [`${ROOT}/skills/a/SKILL.md`]: "# a", [`${ROOT}/skills/b/SKILL.md`]: "# b" },
+      commit ?? COMMIT,
     );
 
-    expect(result.status).toBe("written");
-    expect(await readdir(link)).toEqual(["a"]);
+  /**
+   * 真装一次，再手工把 `a` 删掉 —— 「用户删了一个 skill」之后的真实样子。
+   * ⚠ 走真安装而不是手捏一本账：手捏的哈希对不上真内容，于是每个 skill 都算「变了」，
+   * 那会把 updated / unchanged 的断言全部变成噪音。
+   */
+  const installedThenADeleted = async (linkInto?: string) => {
+    const store = memoryStateStore();
+    await updateSkills(
+      deps(vi.fn().mockResolvedValue(archiveOf()), store, linkInto ? { linkInto } : {}),
+    );
+    await rm(join(directory, "a"), { recursive: true, force: true });
+    return store;
+  };
+
+  it("commit 变了：update 刷新 b，但不把 a 加回来，并说得出是哪几个", async () => {
+    const store = await installedThenADeleted();
+    const next = archiveResponse(
+      { [`${ROOT}/skills/a/SKILL.md`]: "# a", [`${ROOT}/skills/b/SKILL.md`]: "# b2" },
+      "1111111111111111111111111111111111111111",
+    );
+
+    const result = await updateSkills(deps(vi.fn().mockResolvedValue(next), store));
+
+    expect(result).toMatchObject({ status: "written", updated: ["b"], skipped: ["a"] });
+    // a 一个文件都没写出来 —— 只过滤 skills 而不过滤文件循环的话，目录照样会被重建。
+    expect(await readdir(directory)).toEqual(["b"]);
+  });
+
+  it("commit 没变：update 照走快路，同样不复活它", async () => {
+    const store = await installedThenADeleted();
+    expect((await updateSkills(deps(vi.fn().mockResolvedValue(archiveOf()), store))).status).toBe(
+      "unchanged",
+    );
+    expect(await readdir(directory)).toEqual(["b"]);
+  });
+
+  it("add 把它补回来 —— 哪怕 commit 没变，也不许走快路", async () => {
+    const store = await installedThenADeleted();
+
+    const result = await updateSkills(
+      deps(vi.fn().mockResolvedValue(archiveOf()), store, { restoreMissing: true }),
+    );
+
+    expect(await readFile(join(directory, "a", "SKILL.md"), "utf8")).toBe("# a");
+    // ⚠ 补回来的算 **updated**，b 才是 unchanged —— a 盘上确实从「没有」变成了「有」。
+    // 只比哈希会把 a 也报成 unchanged，而用户刚眼看着它回来，那句话是假的。
+    expect(result).toMatchObject({ status: "written", updated: ["a"], unchanged: ["b"], skipped: [] });
+  });
+
+  // ⚠ 判据是「以前记过、现在没了」，不是「盘上没有」。上游**新增**的 skill 盘上本来就没有，
+  // 那种一律要装 —— 那正是 update 存在的理由。写成后者的话 update 永远装不进新 skill。
+  it("上游新增的 skill 照装不误（它盘上本来就没有）", async () => {
+    const store = memoryStateStore();
+    await updateSkills(
+      deps(vi.fn().mockResolvedValue(archiveResponse({ [`${ROOT}/skills/a/SKILL.md`]: "# a" })), store),
+    );
+
+    const result = await updateSkills(
+      deps(
+        vi.fn().mockResolvedValue(archiveOf("2222222222222222222222222222222222222222")),
+        store,
+      ),
+    );
+
+    expect(result).toMatchObject({ skipped: [], updated: ["b"] });
+    expect(await readFile(join(directory, "b", "SKILL.md"), "utf8")).toBe("# b");
+  });
+
+  it("跳过的那几个在账上原样留着 —— 将来 add 补得回来", async () => {
+    const store = await installedThenADeleted();
+    const before = store.current?.packages["group/sub/repo"]?.skills.a;
+    const next = archiveResponse(
+      { [`${ROOT}/skills/a/SKILL.md`]: "# a", [`${ROOT}/skills/b/SKILL.md`]: "# b2" },
+      "1111111111111111111111111111111111111111",
+    );
+
+    await updateSkills(deps(vi.fn().mockResolvedValue(next), store));
+
+    expect(store.current?.packages["group/sub/repo"]?.skills.a).toBe(before);
+  });
+
+  // 判据落在 canonical 上：链接是「已安装」的实现细节，用户要扔掉一个 skill 时扔的是实体那份。
+  it("canonical 还在、只有链接那份没了 ⇒ 链接照样补", async () => {
+    const link = await mkdtemp(join(tmpdir(), "pep-link-"));
+    const store = memoryStateStore();
+    await updateSkills(deps(vi.fn().mockResolvedValue(archiveOf()), store, { linkInto: link }));
+    await rm(join(link, "a"), { recursive: true, force: true });
+
+    await updateSkills(
+      deps(
+        vi.fn().mockResolvedValue(archiveOf("3333333333333333333333333333333333333333")),
+        store,
+        { linkInto: link },
+      ),
+    );
+
+    expect((await readdir(link)).sort()).toEqual(["a", "b"]);
   });
 });
+
