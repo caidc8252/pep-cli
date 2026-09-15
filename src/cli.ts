@@ -13,6 +13,7 @@ import {
   fileSkillsStateStore,
   normalizeDocsUrl,
   projectSkillsTarget,
+  samePlace,
   userSkillsTarget,
   type SkillsTarget,
 } from "./config.js";
@@ -540,7 +541,10 @@ export async function main(): Promise<void> {
     // 整体搬进这个项目、原处删掉。没人会想要那个，而且它不可逆。〕
     const wanted = named.length > 0 ? named : installed;
     const targets = chosenTarget
-      ? wanted.filter((one) => state?.packages[one]?.directory === chosenTarget.directory)
+      ? wanted.filter((one) => {
+          const at = state?.packages[one]?.directory;
+          return at !== undefined && samePlace(at, chosenTarget.directory);
+        })
       : wanted;
 
     if (targets.length === 0) {

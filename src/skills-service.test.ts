@@ -1,9 +1,15 @@
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { planSkillFiles, removeSkills, updateSkills } from "./skills-service.js";
+import {
+  assertInside,
+  planSkillFiles,
+  readCapped,
+  removeSkills,
+  updateSkills,
+} from "./skills-service.js";
 import type { SkillsState, SkillsStateStore } from "./types.js";
 import type { TarEntry } from "./tar.js";
 
@@ -80,7 +86,12 @@ beforeEach(async () => {
 const deps = (
   fetchImpl: unknown,
   stateStore: SkillsStateStore,
-  overrides: { directory?: string; linkInto?: string; restoreMissing?: boolean } = {},
+  overrides: {
+    directory?: string;
+    linkInto?: string;
+    restoreMissing?: boolean;
+    maxArchiveBytes?: number;
+  } = {},
 ) => ({
   issuer: "https://pep.example.com",
   accessToken: "tok",
@@ -799,6 +810,10 @@ describe("跨包同名", () => {
       updated: ["only-b"],
       conflicts: [{ skill: "semi-integration", owner: "repo-a" }],
     });
+    // ⚠ 让开没写的那些文件不能算进 fileCount —— 算进去，「N file(s)」就是句假话。
+    // 归档里两个 skill 各一个文件，真正写下去的只有一个。
+    if (result.status !== "written") throw new Error("unreachable");
+    expect(result.fileCount).toBe(1);
     // A 的那份原封不动 —— 让开的意思就是不碰。
     expect(await readFile(join(directory, "semi-integration", "SKILL.md"), "utf8")).toBe("A 的");
     // 而 B 自己的那个照常刷到了最新。
@@ -917,5 +932,196 @@ describe("removeSkills", () => {
     expect(await readdir(directory)).toEqual(["semi-integration"]);
     expect(store.current?.packages["group/repo-b"]).toBeUndefined();
     expect(store.current?.packages["group/repo-a"]).toBeDefined();
+  });
+});
+
+// ═══ 2026-09-15 安全/一致性审计补的回归用例 ═══════════════════════════════
+//
+// 这一组全部来自静态审计，**变异测试一条都没找出来** —— 317 个变异体 0 存活。
+// 两者查的不是同一类东西：变异测试量的是「已有逻辑被测到没有」，这些是「该有的逻辑没写」。
+
+describe("tar-slip：Windows 上的反斜杠", () => {
+  // ⚠ 实测过的逃逸：entry `root/myskill/..\..\..\..\evil.dll`
+  //   段级检查只按 `/` 切 ⇒ 整条是一段 ⇒ `.. ` 检查放行
+  //   而 win32 的 path.join 把 `\` 当分隔符 ⇒ C:\Users\me\.agents\skills\myskill → C:\Users\evil.dll
+  // Linux/macOS 上 `\` 是普通字符，所以这条只在 Windows 上成立 —— 而这个 CLI 主要跑在 Windows。
+  it.each([
+    ["反斜杠回溯", String.raw`r/s/..\..\..\evil.dll`],
+    ["混用两种分隔符", String.raw`r/s/..\../evil.dll`],
+    ["盘符段", String.raw`r/s/C:/evil.dll`],
+  ])("%s ⇒ 抛，不放行", (_label, path) => {
+    expect(() => planSkillFiles([tarEntry(`${path}`)])).toThrow(/escapes its directory/);
+  });
+
+  it("正常的反斜杠文件名不受影响（它就是个普通段）", () => {
+    // 没有 `..`，只是名字里带反斜杠 —— 切成两段即可，不该抛。
+    const files = planSkillFiles([
+      tarEntry("r/s/SKILL.md", "# s"),
+      tarEntry(String.raw`r/s/a\b.md`, "x"),
+    ]);
+    expect(files.map((one) => one.path).sort()).toEqual(["SKILL.md", "a/b.md"]);
+  });
+});
+
+describe("清理路径的「别人也占着」守卫", () => {
+  const two = (skillsA: Record<string, string>, skillsB: Record<string, string>, dir: string) =>
+    memoryStateStore({
+      version: 4,
+      packages: {
+        "repo-a": { directory: dir, skills: skillsA },
+        "repo-b": { commit: "b".repeat(40), directory: dir, skills: skillsB },
+      },
+    });
+
+  // ⚠ 上游把 B 的某个 skill 删了 ⇒ 我们清它。但 A 也占着这个名字，盘上那份多半是 A 写的
+  // （谁最后 update 谁赢）—— 删了就是在删 A 的东西。`removeSkills` 一直有这道守卫，
+  // `updateSkills` 的清理路径此前没有。
+  it("上游删掉的那个 skill 别人也占着 ⇒ 不删文件", async () => {
+    const store = two({ shared: "h" }, { shared: "h", gone: "h" }, directory);
+    await alreadyOnDisk(directory, "shared", "A 写的");
+    await alreadyOnDisk(directory, "gone");
+
+    await updateSkills({
+      ...deps(
+        vi.fn().mockResolvedValue(archiveResponse({ [`${ROOT}/other/SKILL.md`]: "# o" }, "c".repeat(40))),
+        store,
+      ),
+      source: "repo-b",
+    });
+
+    // `gone` 只有 B 占着 ⇒ 照清。`shared` 有 A 占着 ⇒ 留着，且内容还是 A 的。
+    expect((await readdir(directory)).sort()).toEqual(["other", "shared"]);
+    expect(await readFile(join(directory, "shared", "SKILL.md"), "utf8")).toBe("A 写的");
+  });
+
+  // 换落点那一档更坏：旧处**整份**清掉，而让开没写的那个会被删且不写回，等于凭空消失。
+  it("换落点时旧处整份清 ⇒ 别人占着的那份仍要留下", async () => {
+    const elsewhere = await mkdtemp(join(tmpdir(), "pep-new-"));
+    const store = two({ shared: "h" }, { shared: "h" }, directory);
+    await alreadyOnDisk(directory, "shared", "A 写的");
+
+    await updateSkills({
+      ...deps(
+        vi.fn().mockResolvedValue(archiveResponse({ [`${ROOT}/shared/SKILL.md`]: "B 的" }, "c".repeat(40))),
+        store,
+        { directory: elsewhere },
+      ),
+      source: "repo-b",
+    });
+
+    expect(await readFile(join(directory, "shared", "SKILL.md"), "utf8")).toBe("A 写的");
+  });
+});
+
+// ⚠ 本 CLI 只跑 win32 / darwin，两者的文件系统**默认不区分大小写** —— 仓 A 的 `Docs/`
+// 与仓 B 的 `docs/` 在盘上是同一个目录。精确比较会认为它们无关，于是静默互相覆盖。
+describe("大小写", () => {
+  it("skill 名只差大小写也算撞", async () => {
+    const store = memoryStateStore({
+      version: 4,
+      packages: { "repo-a": { directory, skills: { Docs: "h" } } },
+    });
+    await expect(
+      updateSkills({
+        ...deps(
+          vi.fn().mockResolvedValue(archiveResponse({ [`${ROOT}/docs/SKILL.md`]: "# d" })),
+          store,
+          { restoreMissing: true },
+        ),
+        source: "repo-b",
+      }),
+    ).rejects.toThrow(/repo-a already installs a skill named "docs"/);
+  });
+
+  // ⚠ **两种顺序都要测**。查重是 get + set 两步，只把其中一步小写化时，行为取决于谁先出现：
+  // `Docs` 在前时照样撞上（set 已经小写化），`docs` 在前就漏。只测一种顺序的话，
+  // 半个修复看起来是完整的。
+  it.each([
+    ["大写在前", ["r/Docs/SKILL.md", "r/docs/SKILL.md"]],
+    ["小写在前", ["r/docs/SKILL.md", "r/Docs/SKILL.md"]],
+  ])("包内两个只差大小写的 skill 目录（%s）⇒ 抛", (_label, paths) => {
+    expect(() => planSkillFiles(paths.map((one) => tarEntry(one, "#")))).toThrow(
+      /would both be called/,
+    );
+  });
+
+  it("目录路径只差大小写 ⇒ 算同一处，不当成换了落点", async () => {
+    const store = memoryStateStore({
+      version: 4,
+      packages: {
+        "group/sub/repo": {
+          commit: COMMIT,
+          directory: directory.toUpperCase(),
+          skills: { a: "h" },
+        },
+      },
+    });
+    await alreadyOnDisk(directory, "a");
+    const result = await updateSkills(
+      deps(vi.fn().mockResolvedValue(archiveResponse({ [`${ROOT}/a/SKILL.md`]: "# a" })), store),
+    );
+    // 看成同一处 ⇒ commit 也没变 ⇒ 走 unchanged，而不是「换了落点，旧处整份清」。
+    expect(result.status).toBe("unchanged");
+  });
+});
+
+// ⚠ 这一组测的是**兜底**那道。它当前不可达 —— `segmentsOf` 已经把已知写法挡在前面 ——
+// 所以没有哪条端到端用例能碰到它。正因如此才要直接单测：不测的话，它是对是错没人知道，
+// 而它存在的全部意义就是「`segmentsOf` 哪天漏了一种写法时还有人接着」。
+describe("assertInside —— 写盘前的兜底", () => {
+  it.each([
+    ["回溯出去", "/base/skills", "/base/evil.md"],
+    ["同名前缀不算在内", "/base/skills", "/base/skills-evil/x.md"],
+    ["就是基目录本身", "/base/skills", "/base/skills"],
+    ["绝对路径跑到别处", "/base/skills", "/etc/passwd"],
+  ])("%s ⇒ 抛", (_label, base, target) => {
+    expect(() => assertInside(base, target)).toThrow(/escapes its directory/);
+  });
+
+  it.each([
+    ["直接子级", "/base/skills", "/base/skills/a/SKILL.md"],
+    ["深层", "/base/skills", "/base/skills/a/b/c/d.md"],
+    ["路径里有 .. 但最终落在里面", "/base/skills", "/base/skills/a/../b/SKILL.md"],
+  ])("%s ⇒ 放行", (_label, base, target) => {
+    expect(() => assertInside(base, target)).not.toThrow();
+  });
+});
+
+describe("归档的上限", () => {
+  it("下载超上限 ⇒ 边读边断，不等全进内存", async () => {
+    const big = new Response(new Uint8Array(4096));
+    await expect(readCapped(big, 100)).rejects.toThrow(/too large/);
+  });
+
+  // ⚠ 只测 `readCapped` 本身是不够的 —— 它可以完全正确，却一次都没被调用。这条走的是
+  // 真正的调用链（updateSkills → readCapped），钉的是「这道上限确实接上了」。
+  it("上限确实接在下载那一步上", async () => {
+    await expect(
+      updateSkills(
+        deps(
+          vi.fn().mockResolvedValue(archiveResponse({ [`${ROOT}/a/SKILL.md`]: "# a" })),
+          memoryStateStore(),
+          { maxArchiveBytes: 8 },
+        ),
+      ),
+    ).rejects.toThrow(/too large/);
+  });
+
+  it("没超就原样读出来", async () => {
+    const body = new Uint8Array([1, 2, 3, 4]);
+    expect(await readCapped(new Response(body), 100)).toEqual(body);
+  });
+
+  // ⚠ 钉住 Node 的错误码：`maxOutputLength` 超了抛的就是这个，catch 里认的也是这个。
+  // 哪天 Node 改了码，这条会红 —— 而那时 gzip 炸弹的防线是静默失效的。
+  it("gunzipSync 的 maxOutputLength 超了抛 ERR_BUFFER_TOO_LARGE", () => {
+    const bomb = gzipSync(new Uint8Array(10_000));
+    let code: string | undefined;
+    try {
+      gunzipSync(bomb, { maxOutputLength: 10 });
+    } catch (error) {
+      code = (error as NodeJS.ErrnoException).code;
+    }
+    expect(code).toBe("ERR_BUFFER_TOO_LARGE");
   });
 });

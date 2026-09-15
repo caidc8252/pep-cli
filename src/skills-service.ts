@@ -1,12 +1,30 @@
 import { cp, mkdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { platform } from "node:os";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import { readTar, type TarEntry } from "./tar.js";
-import type { SkillsStateStore } from "./types.js";
+import { samePlace } from "./config.js";
+import type { SkillsPackageState, SkillsStateStore } from "./types.js";
 
 const ARCHIVE_PATH = "/api/skills/archive";
+
+// ── 归档的三道上限 ──────────────────────────────────────────────────────────
+// ⚠ 没有上限的话，一个几 MB 的 gzip 炸弹能解出几十 GB，把用户机器的内存打爆。威胁模型与
+// tar-slip 那条相同：`skills add` 收的是那台 GitLab 上的**任意**仓，任何内网用户都建得出。
+// `npx skills` 也有这三道（10 MiB / 25 MiB / 1000 个，可用环境变量放宽）。
+//
+// 我们取的数比它松：这里取的是**整仓**归档（PEP 那侧不再按 path 收窄），正常仓本来就更大。
+const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
+const MAX_UNPACKED_BYTES = 256 * 1024 * 1024;
+const MAX_ENTRIES = 10_000;
+
+function tooBig(what: string, limit: number): Error {
+  return new Error(
+    `The skills archive is too large (${what} exceeds ${Math.round(limit / 1024 / 1024)} MiB). ` +
+      `Refusing to unpack it.`,
+  );
+}
 
 /** 认一个 skill 的凭据。**目录里有这个文件就是一个 skill，没有就不是** —— 见 `planSkillFiles`。 */
 const SKILL_MANIFEST = "SKILL.md";
@@ -86,18 +104,22 @@ export function planSkillFiles(entries: readonly TarEntry[]): SkillFile[] {
   // 表现是「装上了，但内容是两个 skill 混起来的、且每次同步取决于归档顺序」。那是静默的，
   // 而这条链路上游是我们自己的 PEP + 自己的 GitLab：重名是上游写错了，该在那边改，
   // 不该由这里挑一个赢家。与 tar-slip 同一口径 —— 不是常规情况，是**信号**。
+  // ⚠ 键用小写：win32 / darwin 的文件系统默认不区分大小写，`Docs/` 与 `docs/` 在盘上
+  // 是同一个目录。精确比较会放它们过去，然后静默互相覆盖。
   const seen = new Map<string, string>();
   for (const root of roots) {
-    const name = root[root.length - 1];
+    const name = root[root.length - 1] as string;
     const where = root.join("/");
-    const first = seen.get(name);
+    // ⚠ 按**小写**查重，落盘仍用原名。win32 / darwin 的文件系统默认不区分大小写，
+    // `Docs/` 与 `docs/` 在盘上是同一个目录 —— 精确比较会放它们过去，然后静默互相覆盖。
+    const first = seen.get(name.toLowerCase());
     if (first !== undefined) {
       throw new Error(
         `Two skills in this package would both be called "${name}": ${first} and ${where}. ` +
           `Skill names come from the directory name, so they must be unique within a package.`,
       );
     }
-    seen.set(name, where);
+    seen.set(name.toLowerCase(), where);
   }
 
   const files: SkillFile[] = [];
@@ -117,10 +139,61 @@ export function planSkillFiles(entries: readonly TarEntry[]): SkillFile[] {
   return files;
 }
 
-/** 路径切段并挡掉 tar-slip。空段与 `.` 丢掉，`..` 抛。 */
+/**
+ * 边读边计数，超了就断开。
+ *
+ * ⚠ 不能只在 `arrayBuffer()` 之后判大小 —— 那时字节已经全在内存里了，上限等于没设。
+ * 也不能指望 `content-length`：PEP 那侧是**流式转发**的，它另建了一份响应头，压根不带这条
+ * （2026-09-15 核对 `skills.controller.ts`）。所以唯一真正管用的是自己数。
+ */
+export async function readCapped(response: Response, limit: number): Promise<Uint8Array> {
+  const reader = response.body?.getReader();
+  /* v8 ignore next -- 上游 !response.ok 已提前返回，能到这儿的响应必有体 */
+  if (!reader) return new Uint8Array(await response.arrayBuffer());
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel();
+      throw tooBig("the download", limit);
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return out;
+}
+
+/** 算出来的落点必须仍在目标目录之内。跑出去就抛 —— 见调用点。 */
+export function assertInside(base: string, target: string): void {
+  const rel = relative(resolve(base), resolve(target));
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+    throw new Error(`Refusing an archive entry that escapes its directory: ${target}`);
+  }
+}
+
+/**
+ * 路径切段并挡掉 tar-slip。空段与 `.` 丢掉，`..` 抛。
+ *
+ * ⚠ **必须按 `/` 和 `\` 一起切。** 只切 `/` 的话，`..\..\evil` 会作为**一整段**通过
+ * `..` 检查 —— 而 win32 的 `path.join` 把 `\` 当分隔符，于是它在 Windows 上照样逃出目标
+ * 目录。2026-09-15 实测：
+ *   entry `root/myskill/..\..\..\..\evil.dll`
+ *   → 落盘 `C:\Users\evil.dll`（目标本该是 `C:\Users\me\.agents\skills\myskill`）
+ *
+ * 这道门是真的要挡人，不只是防呆：`skills add` 收的是我们那台 GitLab 上的**任意**仓，
+ * 任何内网用户都建得出一个，而装它的人只需要跑一次 `pep skills add`。
+ */
 function segmentsOf(path: string): string[] {
-  const segments = path.split("/").filter((one) => one !== "" && one !== ".");
-  if (segments.some((one) => one === "..")) {
+  const segments = path.split(/[\\/]+/).filter((one) => one !== "" && one !== ".");
+  if (segments.some((one) => one === ".." || /^[a-z]:$/i.test(one))) {
     throw new Error(`Refusing an archive entry that escapes its directory: ${path}`);
   }
   return segments;
@@ -150,6 +223,12 @@ export type SkillsUpdateDependencies = {
    * 出口。于是 `add` 传 true，`update` 不传。
    */
   restoreMissing?: boolean;
+  /**
+   * 下载上限，只为可测而开的缝（与 `fetch` 同一口径）。默认 `MAX_ARCHIVE_BYTES`。
+   * ⚠ 真实上限是 64 MiB，用真数据去撞不现实 —— 而不撞一次就测不到「这道上限有没有真的
+   * 被接进调用链」。只测 `readCapped` 本身是不够的：它可以完全正确，却一次都没被调用。
+   */
+  maxArchiveBytes?: number;
   stateStore: SkillsStateStore;
   fetch?: typeof globalThis.fetch;
 };
@@ -275,6 +354,31 @@ function hashSkill(files: readonly SkillFile[]): string {
  * ⚠ 哈希只用来**汇报**，不用来决定写不写：commit 变了就整包重写。省那几次写盘换来的是
  * 「本地被人手改过却报 unchanged」这种查不出的状态 —— 不值。
  */
+/**
+ * 同一个目录下，这个 skill 名有没有被**别的包**占着。三处共用：装之前的冲突判定、
+ * 清理之前的守卫、以及 `removeSkills`。
+ *
+ * ⚠ 名字比较**不分大小写**：本 CLI 只跑 win32 / darwin，两者的文件系统默认不区分大小写
+ * —— 仓 A 的 `Docs/` 与仓 B 的 `docs/` 在盘上是同一个目录。精确比较会认为它们无关，
+ * 于是静默互相覆盖，而那正是这道检查要挡的东西。
+ * （目录路径仍按精确比较：它多半是我们自己 join 出来的，只有 `--dir` 由用户敲；
+ *  那一档敲成两种大小写时最坏是漏判，而不是误判。）
+ */
+function otherClaimant(
+  packages: Record<string, SkillsPackageState>,
+  self: string,
+  directory: string,
+  skill: string,
+): string | undefined {
+  const wanted = skill.toLowerCase();
+  return Object.entries(packages).find(
+    ([other, pkg]) =>
+      other !== self &&
+      samePlace(pkg.directory, directory) &&
+      Object.keys(pkg.skills).some((one) => one.toLowerCase() === wanted),
+  )?.[0];
+}
+
 export type SkillsRemoveResult = {
   name: string;
   /** 真的删掉了的那些。 */
@@ -311,9 +415,7 @@ export async function removeSkills(
   const deleted: string[] = [];
   const keptForOthers: SkillConflict[] = [];
   for (const skill of Object.keys(pkg.skills).sort()) {
-    const owner = Object.entries(state.packages).find(
-      ([other, one]) => other !== name && one.directory === pkg.directory && skill in one.skills,
-    )?.[0];
+    const owner = otherClaimant(state.packages, name, pkg.directory, skill);
     if (owner !== undefined) {
       keptForOthers.push({ skill, owner });
       continue;
@@ -382,18 +484,18 @@ export async function updateSkills(
   // 盘上那份还在原处，直接答「没变」等于什么都没做。链接目录单独变了也算变 —— 那一档
   // canonical 已经对了，但新的 agent 目录里还没有链接。
   const sameTarget =
-    previous?.directory === dependencies.directory &&
-    previous?.linkedInto === dependencies.linkInto;
+    previous !== undefined &&
+    samePlace(previous.directory, dependencies.directory) &&
+    (previous.linkedInto === undefined
+      ? dependencies.linkInto === undefined
+      : dependencies.linkInto !== undefined && samePlace(previous.linkedInto, dependencies.linkInto));
   /**
    * 这个 skill 名在**同一个目录**下有没有被别的包占着。
    *
    * ⚠ 只有落点相同才算撞 —— 两个包各装各的目录（一个个人级一个项目级）本来就互不相干。
    */
   const claimedElsewhere = (skill: string): string | undefined =>
-    Object.entries(state?.packages ?? {}).find(
-      ([other, pkg]) =>
-        other !== name && pkg.directory === dependencies.directory && skill in pkg.skills,
-    )?.[0];
+    otherClaimant(state?.packages ?? {}, name, dependencies.directory, skill);
 
   // 账上记着、盘上已经没了的那些 —— 用户自己删掉的。**两条命令对它的态度相反**，见
   // `restoreMissing` 的注释。
@@ -420,8 +522,24 @@ export async function updateSkills(
     return { status: "unchanged", name, commit, conflicts: standing };
   }
 
-  const gzipped = new Uint8Array(await response.arrayBuffer());
-  const files = planSkillFiles(readTar(gunzipSync(gzipped)));
+  const gzipped = await readCapped(response, dependencies.maxArchiveBytes ?? MAX_ARCHIVE_BYTES);
+  // ⚠ `maxOutputLength` 是挡 gzip 炸弹的那一道 —— 超了就抛，而不是解到一半把内存吃光。
+  let unpacked: Uint8Array;
+  try {
+    unpacked = gunzipSync(gzipped, { maxOutputLength: MAX_UNPACKED_BYTES });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ERR_BUFFER_TOO_LARGE") {
+      throw tooBig("the unpacked archive", MAX_UNPACKED_BYTES);
+    }
+    throw error;
+  }
+  const entries = readTar(unpacked);
+  if (entries.length > MAX_ENTRIES) {
+    throw new Error(
+      `The skills archive holds ${entries.length} files (limit ${MAX_ENTRIES}). Refusing to unpack it.`,
+    );
+  }
+  const files = planSkillFiles(entries);
 
   const bySkill = new Map<string, SkillFile[]>();
   for (const file of files) {
@@ -499,6 +617,12 @@ export async function updateSkills(
   if (previous !== undefined) {
     const stale = sameTarget ? removed : Object.keys(previous.skills);
     for (const skill of stale) {
+      // ⚠ **别的包也占着这个名字就别删** —— 盘上那份多半是它写的（谁最后 update 谁赢），
+      // 删了就是在删别人的东西。`removeSkills` 一直有这道守卫，这两条清理路径此前没有：
+      //   · 上游删掉本包某个 skill ⇒ 连带删掉另一个包在同一处的那份
+      //   · 本包换落点 ⇒ 旧处整份删掉，同样会连带
+      // 后者更坏：让开不写的那个 skill 会被删掉且不写回，等于凭空消失。
+      if (otherClaimant(state?.packages ?? {}, name, previous.directory, skill)) continue;
       await rm(join(previous.directory, skill), { recursive: true, force: true });
       // canonical 与链接两处都要清：只清一边会留下一条指向空处的死链（或一份永不更新的副本）。
       if (previous.linkedInto !== undefined) {
@@ -517,6 +641,9 @@ export async function updateSkills(
   for (const file of files) {
     if (untouched.has(file.skill)) continue;
     const target = join(dependencies.directory, file.skill, ...file.path.split("/"));
+    // ⚠ 兜底：路径算完之后**再确认一次**没跑出去。段级检查（`segmentsOf`）挡的是已知的
+    // 写法，这一句挡的是没想到的 —— 两道都便宜，而写错的代价是往用户机器上任意位置写文件。
+    assertInside(dependencies.directory, target);
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, file.data);
   }
@@ -561,7 +688,9 @@ export async function updateSkills(
     updated,
     unchanged,
     skills,
-    fileCount: files.filter((one) => !skipped.includes(one.skill)).length,
+    // ⚠ 扣掉的是 `untouched` 全部（用户删的 + 让给别的包的），不只是 skipped ——
+    // 让开没写的那些文件算进去，「N file(s)」就是句假话。
+    fileCount: files.filter((one) => !untouched.has(one.skill)).length,
     removed,
     skipped,
     conflicts,

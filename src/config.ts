@@ -224,6 +224,22 @@ export type SkillsTarget = {
   linkInto?: string;
 };
 
+/**
+ * 两个路径指的是不是同一处。
+ *
+ * ⚠ **不分大小写**：本 CLI 只跑 win32 / darwin（见 package.json 的 `os`），两者的文件系统
+ * 默认不区分大小写 —— PowerShell 里 `cd d:\test\app` 之后 `process.cwd()` 就是小写的，
+ * 而账上记的可能是 `D:\Test\App`。精确比较在这三处各有各的错法：
+ *   · `sameTarget` —— 看成「换了落点」，于是把旧处（其实就是同一处）整份清一遍
+ *   · `update -p` 的筛子 —— 一条都匹配不上，命令静默地什么都不做
+ *   · 跨包同名判定 —— **漏判**，两个仓照样静默互相覆盖（这条是危险方向）
+ *
+ * 在 Linux 上这会把两个真正不同的目录看成同一个，但本 CLI 不支持 Linux。
+ */
+export function samePlace(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
+
 /** 默认那一档：个人级，一次同步这台机器上所有项目都看得见。 */
 export function userSkillsTarget(): SkillsTarget {
   return { directory: defaultSkillsDirectory(), linkInto: claudeSkillsDirectory() };
