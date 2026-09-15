@@ -356,7 +356,7 @@ describe("updateSkills —— 接进 agent 目录", () => {
   it("链接目录的父级是软链时，建出来的链接仍然读得到内容", async () => {
     const physical = await mkdtemp(join(tmpdir(), "pep-physical-"));
     const viaSymlink = join(await mkdtemp(join(tmpdir(), "pep-via-")), "claude");
-    await symlink(physical, viaSymlink);
+    await symlink(physical, viaSymlink, process.platform === "win32" ? "junction" : "dir");
 
     await updateSkills({
       ...deps(

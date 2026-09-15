@@ -57,16 +57,35 @@ overrides apply to this login only and are not reused by the next login.`,
   skills: {
     summary: "Download and update PEP agent skills.",
     commands: {
-      sync: {
-        summary: "Fetch the latest agent skills and install them locally.",
-        usage: "pep skills sync [flags]",
+      list: {
+        summary: "List the skill repositories you have added.",
+        usage: "pep skills list",
+        description: "Requires a saved PEP login. Lists locally registered repositories.\nUse pep skills add to add a repository, or pep skills update to refresh it.",
+        examples: ["pep skills list"],
+      },
+      add: {
+        summary: "Add skills from a repository on PEP's GitLab.",
+        usage: "pep skills add <repo> [flags]",
+        description: `Accepts a full HTTPS repository URL or group/project[@ref]. URLs with
+/-/tree/<ref> are also supported. PEP fetches the repository with its own service
+account; no GitLab credential is needed locally. Other hosts are refused.
+Each directory containing SKILL.md is installed as a skill.
+Requires a saved PEP login.`,
+        flags: ["--dir <path>   Install only to this directory; skip links into Claude Code"],
+        examples: ["pep skills add group/project", "pep skills add group/project@main", 'pep skills add group/project --dir "./my-skills"'],
+      },
+      update: {
+        summary: "Update installed skill repositories and report changed skills.",
+        usage: "pep skills update [<repo>...] [flags]",
         description: `Requires a saved PEP login. Downloads skills to:
   ${defaultSkillsDirectory()}
 Also links them into ${claudeSkillsDirectory()} for Claude Code,
 or copies them if links are unavailable. Only skills managed by pep are updated
-or removed; files you added yourself are left alone.`,
+or removed; files you added yourself are left alone.
+With no repository arguments, updates all added repositories. Named repositories
+must already have been added. Reports which individual skills changed.`,
         flags: ["--dir <path>   Install only to this directory; skip links into Claude Code"],
-        examples: ["pep skills sync", 'pep skills sync --dir "./my-skills"'],
+        examples: ["pep skills update", "pep skills update group/project", 'pep skills update --dir "./my-skills"'],
       },
     },
   },

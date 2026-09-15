@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import packageJson from "../package.json" with { type: "json" };
 import { createAuthService } from "./auth-service.js";
 import {
   DEFAULT_CLIENT_ID,
@@ -21,68 +22,7 @@ import { setupNexusCredential } from "./nexus-service.js";
 import { installedPackages, updateSkills, type SkillsUpdateResult } from "./skills-service.js";
 import type { CliConfig, ConfigStore } from "./types.js";
 
-const VERSION = "0.3.0";
-
-function usage(): string {
-  return `PEP CLI ${VERSION}
-
-Usage:
-  pep auth login [--issuer <url>] [--client-id <id>] [--resource <uri> ...]
-  pep auth status
-  pep auth token
-  pep auth logout
-  pep skills list
-  pep skills add <repo-url | group/project[@ref]> [--dir <path>]
-  pep skills update [<repo>...] [--dir <path>]
-  pep docs list [--docs-url <url>]
-  pep docs get <path> [--docs-url <url>]
-  pep nexus setup
-
-The issuer is built into this executable. --issuer overrides it for that one command and is
-NOT remembered — pass it every time you log in against a non-default deployment.
---resource names which resource server the token is for (RFC 8707); repeat it for more than
-one. It defaults to the docs platform — a token minted without it is rejected by every
-resource server, and their answer looks exactly like "this token does not exist".
-Use \`pep auth token\` when another agent needs a fresh bearer token.
-
-\`pep skills add\` takes a repository on the platform's own GitLab, either as a full https URL or
-as the path with the host left off:
-
-  pep skills add https://git.example.com/group/sub/project
-  pep skills add https://git.example.com/group/sub/project/-/tree/some-branch
-  pep skills add group/sub/project
-  pep skills add group/sub/project@some-branch
-
-Anything on another host is refused. PEP fetches it with its own read-only service account, so no
-GitLab credential ever reaches this machine. \`pep skills list\` shows what you have added and
-\`pep skills update\` refreshes it — all of it, or just the repositories you name. One repository
-may hold more than one skill: every directory containing a SKILL.md becomes one, wherever it sits,
-and update reports which of them actually changed rather than just that the repository moved.
-
-\`pep skills update\` fetches the latest skills from PEP and writes them to the shared agent
-directory (${defaultSkillsDirectory()}), which Codex, Cursor, Amp and ~20 other agents read
-directly. Claude Code keeps its own directory, so each skill is also linked into
-${claudeSkillsDirectory()} — one copy on disk, updated in one place. Where links are not
-available the skill is copied instead and the run says so.
-
---dir <path> writes to that path ONLY and skips the linking, for an agent that reads neither
-directory. Either way sync only touches skills it wrote itself; anything you put there by
-hand is left alone.
-
-\`pep docs list\` prints the documents this account can read (path + description); feed a path
-straight to \`pep docs get\` to print that document as markdown on stdout. The documentation
-site is built in (${DEFAULT_DOCS_URL}); --docs-url overrides it and is then remembered.
-
-\`pep nexus setup\` asks PEP for this organisation's Maven repository credential and saves it as
-the two environment variables the Newland Android SDK reads — \`${USERNAME_VAR}\` and
-\`${PASSWORD_VAR}\` — so you do not copy anything by hand. On Windows it writes them to your user
-environment (\`setx\`); on macOS it keeps a marked block in your shell profile, backing the file up
-first and touching nothing else. Either way persistence only affects NEW shells, so the two lines
-are also printed on stdout: \`eval "$(pep nexus setup)"\` uses them in the current one.
-Only Android needs this — the Windows and iOS SDKs are cloned from Git, not pulled from Maven.
-The password is shown by PEP once and never stored, so a second run reports 409 rather than
-handing it out again.`;
-}
+const VERSION = packageJson.version;
 
 /** 一次更新的汇报。`add` 与 `update` 共用 —— 两者的产出形状本来就一样。 */
 function reportUpdate(result: SkillsUpdateResult): void {
@@ -274,13 +214,11 @@ export async function main(): Promise<void> {
 
   if (group === "skills") {
     if (command !== "update" && command !== "add" && command !== "list") {
-      throw new Error(`Unknown skills command.\n\n${usage()}`);
+      throw new Error(`Unknown skills command.\n\n${usage(VERSION, ["skills"])}`);
     }
     // `add` 的位置参数在选项摘掉之前取 —— 它紧跟命令，不会跟 `--dir` 的值混。
     // `add` 收恰好一个；`update` 收零个或多个（零个 = 全部已装的）。
     const requested = command === "add" ? args.shift() : undefined;
-    const named = command === "update" ? args.filter((one) => !one.startsWith("--")) : [];
-    for (const one of named) args.splice(args.indexOf(one), 1);
     if (command === "add" && !requested) {
       throw new Error("pep skills add needs a repository: a full https URL, or <group>/<project>.");
     }
@@ -288,6 +226,8 @@ export async function main(): Promise<void> {
     // 显式 `--dir` = 「就铺到这儿，别的什么都别做」—— 给那些不读通用目录的 agent 用的逃生口，
     // 所以那一档不接任何链接（接了反而会往用户没要求的地方写）。
     const explicitDirectory = command === "list" ? undefined : option(args, "--dir");
+    const named = command === "update" ? args.filter((one) => !one.startsWith("--")) : [];
+    for (const one of named) args.splice(args.indexOf(one), 1);
     const directory = explicitDirectory ?? defaultSkillsDirectory();
     if (args.length > 0) throw new Error(`Unknown option: ${args[0]}`);
 

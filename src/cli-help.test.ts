@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { main } from "./cli.js";
 import { createAuthService } from "./auth-service.js";
 import { systemCredentialStore } from "./credential-store.js";
@@ -58,7 +59,9 @@ describe("command help", () => {
       ["auth", "logout", "revoke"],
       ["docs", "list", "--docs-url"],
       ["docs", "get", "<path>"],
-      ["skills", "sync", "--dir"],
+      ["skills", "list", "repositories"],
+      ["skills", "add", "<repo>"],
+      ["skills", "update", "--dir"],
       ["nexus", "setup", "never prints the username or password"],
     ])("%s %s gets its own description", async (group, command, detail) => {
       const text = await help([group, command, flag]);
@@ -101,6 +104,7 @@ describe("command help", () => {
   });
 
   it("preserves version output", async () => {
-    expect(await help(["--version"])).toBe("0.2.0");
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+    expect(await help(["--version"])).toBe(pkg.version);
   });
 });

@@ -61,7 +61,8 @@ pep --help
 pep auth --help
 pep auth login --help
 pep docs get --help
-pep skills sync --help
+pep skills add --help
+pep skills update --help
 pep nexus setup --help
 ```
 
