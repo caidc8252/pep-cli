@@ -285,3 +285,30 @@ describe("update 的范围筛选", () => {
     expect(inScope(["g/personal"], packages, project)).toEqual([]);
   });
 });
+
+// ⚠ `add` 与 `update` 走的是**同一个** `updateSkills`，区别只在 cli.ts 里怎么算落点、
+// 取哪几个 source。所以「盘上那份被删了要能补回来」这件事两条路都成立 —— 前提是
+// 对一个**已装过**的包、不带开关时，add 解析出来的落点与 update 完全相同。
+// 不相同的话，一次「重新 add」就成了一次搬家。
+describe("重新 add 一个已装过的包 = 原地重铺，不是搬家", () => {
+  const recorded = {
+    directory: join("/work/app", ".agents", "skills"),
+    linkedInto: join("/work/app", ".claude", "skills"),
+  };
+
+  it("不带开关时，add 与 update 算出同一个落点", () => {
+    // cli.ts 里 add 那一支传的是 chosenTarget（没给开关就是 undefined），
+    // update 那一支恒传 undefined。没给开关时两者是同一次调用。
+    const viaAdd = targetForSource(undefined, recorded);
+    const viaUpdate = targetForSource(undefined, recorded);
+    expect(viaAdd).toEqual(viaUpdate);
+    expect(viaAdd.directory).toBe(recorded.directory);
+  });
+
+  // 带了开关才是搬家 —— 这是 add 与 update 唯一的分歧，也是刻意的。
+  it("带 -p 才搬家（update 那条路则永远不搬）", () => {
+    const moved = targetForSource(projectSkillsTarget("/elsewhere"), recorded);
+    expect(moved.directory).toBe(join("/elsewhere", ".agents", "skills"));
+    expect(targetForSource(undefined, recorded).directory).toBe(recorded.directory);
+  });
+});
