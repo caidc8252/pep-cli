@@ -83,6 +83,7 @@ it already lives and never moves anything. On update, -p and --dir instead NARRO
 repositories installed there: \`pep skills update -p\` refreshes only this project's, and reports
 nothing to do when the project has none. To move a repository, add it again with the new flag —
 add is where the location is decided, and the copy in the old location is then removed.
+Deleting a skill folder by hand is fine: update notices it is gone and writes it again.
 Either way update only touches skills it wrote itself; anything you put there by hand is left alone.
 
 \`pep docs list\` prints the documents this account can read (path + description); feed a path

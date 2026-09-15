@@ -91,6 +91,18 @@ const deps = (
   ...overrides,
 });
 
+/**
+ * 把一个 skill「已经在盘上」的样子摆出来。
+ *
+ * ⚠ 断言 `unchanged` 的用例**必须**先调它。快路现在会核一遍盘上那份在不在（账本答不了
+ * 这件事），只在账上记一笔而盘上空着，拿到的是 `written` —— 而那正是「手工删了文件」
+ * 的形状，不是「已经是这一版了」。
+ */
+async function alreadyOnDisk(root: string, skill: string, body = "盘上原有的"): Promise<void> {
+  await mkdir(join(root, skill), { recursive: true });
+  await writeFile(join(root, skill, "SKILL.md"), body);
+}
+
 describe("updateSkills —— 失败的归因", () => {
   it.each([
     [401, /pep auth login/],
@@ -171,13 +183,16 @@ describe("updateSkills —— 落盘", () => {
       version: 4,
       packages: { "group/sub/repo": { commit: COMMIT, directory, skills: { "a": "h" } } },
     });
+    await alreadyOnDisk(directory, "a");
 
     expect(await updateSkills(deps(fetchImpl, store))).toEqual({
       status: "unchanged",
       name: "group/sub/repo",
       commit: COMMIT,
     });
-    expect(await readdir(directory)).toEqual([]);
+    // 没解包：盘上那份还是原样，一个字节没被覆盖。
+    expect(await readdir(directory)).toEqual(["a"]);
+    expect(await readFile(join(directory, "a", "SKILL.md"), "utf8")).toBe("盘上原有的");
   });
 
   it("提交没变但换了目录 ⇒ 照写（新目录里还什么都没有）", async () => {
@@ -550,11 +565,12 @@ describe("落点变了 ⇒ 旧处那份清掉", () => {
     expect(await readdir(link)).toEqual(["a"]);
   });
 
-  it("落点完全没变 ⇒ 仍然走「unchanged」，别把这条快路一起修没了", async () => {
+  it("落点完全没变、盘上那份也还在 ⇒ 仍然走「unchanged」，别把这条快路一起修没了", async () => {
     const store = memoryStateStore({
       version: 4,
       packages: { "group/sub/repo": { commit: COMMIT, directory, skills: { a: "h" } } },
     });
+    await alreadyOnDisk(directory, "a");
 
     expect((await updateSkills(deps(vi.fn().mockResolvedValue(archiveOf()), store))).status).toBe(
       "unchanged",
@@ -576,5 +592,47 @@ describe("落点变了 ⇒ 旧处那份清掉", () => {
       linkedInto: "/elselink",
       skills: {},
     });
+  });
+});
+
+// ═══ 盘上那份被手工删了之后 ═══════════════════════════════════════════════
+//
+// 「我把 ~/.agents/skills/xxx 删了，再 update 一下能回来吗」—— 这是个常见动作
+// （清理、试错、手滑）。快路的前提是「盘上已经正好是这一版」，而账本答不了这件事。
+describe("盘上那份被删了 ⇒ update 要能补回来", () => {
+  const archiveOf = () => archiveResponse({ [`${ROOT}/skills/a/SKILL.md`]: "# a" });
+
+  it("commit 没变，但盘上那份被删了 ⇒ 重新铺出来", async () => {
+    // 账上记着装过，盘上却什么都没有 —— 正是「手工删掉」之后的样子。
+    const store = memoryStateStore({
+      version: 4,
+      packages: { "group/sub/repo": { commit: COMMIT, directory, skills: { a: "h" } } },
+    });
+    expect(await readdir(directory)).toEqual([]);
+
+    const result = await updateSkills(deps(vi.fn().mockResolvedValue(archiveOf()), store));
+
+    expect(result.status).toBe("written");
+    expect(await readFile(join(directory, "a", "SKILL.md"), "utf8")).toBe("# a");
+  });
+
+  it("canonical 还在、只有链接那份被删了 ⇒ 链接补回来", async () => {
+    const link = await mkdtemp(join(tmpdir(), "pep-link-"));
+    await mkdir(join(directory, "a"), { recursive: true });
+    await writeFile(join(directory, "a", "SKILL.md"), "# a");
+    const store = memoryStateStore({
+      version: 4,
+      packages: {
+        "group/sub/repo": { commit: COMMIT, directory, linkedInto: link, skills: { a: "h" } },
+      },
+    });
+    expect(await readdir(link)).toEqual([]);
+
+    const result = await updateSkills(
+      deps(vi.fn().mockResolvedValue(archiveOf()), store, { linkInto: link }),
+    );
+
+    expect(result.status).toBe("written");
+    expect(await readdir(link)).toEqual(["a"]);
   });
 });

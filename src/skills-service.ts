@@ -1,4 +1,4 @@
-import { cp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { platform } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { createHash } from "node:crypto";
@@ -255,6 +255,29 @@ function hashSkill(files: readonly SkillFile[]): string {
  * ⚠ 哈希只用来**汇报**，不用来决定写不写：commit 变了就整包重写。省那几次写盘换来的是
  * 「本地被人手改过却报 unchanged」这种查不出的状态 —— 不值。
  */
+/**
+ * 账上记着的那些 skill，盘上是不是**真的都还在**。
+ *
+ * 只核「在不在」，不核内容 —— 内容对不对由哈希在取下来之后回答。这里要的只是把快路的
+ * 前提从「账上说是这一版」变成「盘上也确实有」，因为前者在用户手工删文件之后依然成立。
+ *
+ * ⚠ 用 `stat` 而不是 `lstat`：它跟随符号链接，于是**悬空的链接算「不在」**。canonical
+ * 被删而链接还挂着时正是这个形状，那时必须重铺。
+ */
+async function allPresent(
+  directory: string,
+  skills: string[],
+  linkedInto: string | undefined,
+): Promise<boolean> {
+  for (const skill of skills) {
+    if (!(await stat(join(directory, skill)).catch(() => null))) return false;
+    if (linkedInto !== undefined && !(await stat(join(linkedInto, skill)).catch(() => null))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export async function updateSkills(
   dependencies: SkillsUpdateDependencies,
 ): Promise<SkillsUpdateResult> {
@@ -279,7 +302,16 @@ export async function updateSkills(
   const sameTarget =
     previous?.directory === dependencies.directory &&
     previous?.linkedInto === dependencies.linkInto;
-  if (commit !== undefined && commit === previous?.commit && sameTarget) {
+  // ⚠ **还要核一遍盘上那份真的在。** 账本答不了这件事：用户手工删掉一个 skill 目录之后
+  // 账本一个字都不会变，于是快路会答「unchanged」然后什么都不做 —— 而 `add` 走的是同一个
+  // 函数、同一条快路，**重新 add 也补不回来**，除了手工改账本没有别的出路。
+  // （2026-09-15 补。此前只比 commit + 落点，那两样说的都是「我上次干了什么」，
+  // 没有一样说得出「现在盘上是什么」。）
+  const intact =
+    sameTarget &&
+    previous !== undefined &&
+    (await allPresent(previous.directory, Object.keys(previous.skills), previous.linkedInto));
+  if (commit !== undefined && commit === previous?.commit && intact) {
     // 已经是这一版了。体还没读完就掐掉，省下传输 —— 这是个半吊子的省法，真要省该是
     // 条件请求（CLI 带 If-None-Match、PEP 答 304），但 PEP 那侧还没做。
     await response.body?.cancel();

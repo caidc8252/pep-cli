@@ -137,6 +137,10 @@ pep skills add group/sub/project -p    # move it into this project
 `pep skills list` prints each repository with the directory it lives in, which is what `-p` matches
 against.
 
+Deleting a skill folder by hand is fine — `pep skills update` notices it is missing and writes it
+again. It checks the disk, not just its own ledger, so it cannot report "already up to date" about
+files that are no longer there.
+
 `pep auth token` writes only the access token to stdout, so agents can use it without parsing status
 text. Refresh occurs automatically shortly before expiry and the rotated refresh token replaces the old
 credential atomically.
