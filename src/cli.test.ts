@@ -312,3 +312,24 @@ describe("重新 add 一个已装过的包 = 原地重铺，不是搬家", () =>
     expect(targetForSource(undefined, recorded).directory).toBe(recorded.directory);
   });
 });
+
+describe("parseSkillsArgs —— remove", () => {
+  it("收恰好一个仓库名", () => {
+    expect(parseSkillsArgs("remove", ["group/repo"]).requested).toBe("group/repo");
+  });
+
+  it("不给仓库 ⇒ 说清楚，并指向 list", () => {
+    expect(() => parseSkillsArgs("remove", [])).toThrow(/needs a repository.*pep skills list/s);
+  });
+
+  it("多给一个 ⇒ 说出来，不默默只删第一个", () => {
+    expect(() => parseSkillsArgs("remove", ["a/b", "c/d"])).toThrow(/Unexpected argument/);
+  });
+
+  // ⚠ remove 的落点**只能**来自账本。让调用方指一个目录去删，等于让他指着一个我们没记过
+  // 的地方删文件 —— 那是个删错东西的入口，不是便利。
+  it("不收 -p / --dir：删哪儿由账本说了算", () => {
+    expect(() => parseSkillsArgs("remove", ["a/b", "-p"])).toThrow(/Unknown option/);
+    expect(() => parseSkillsArgs("remove", ["a/b", "--dir", "/tmp/x"])).toThrow(/Unknown option/);
+  });
+});

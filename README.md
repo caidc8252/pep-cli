@@ -137,6 +137,38 @@ pep skills add group/sub/project -p    # move it into this project
 `pep skills list` prints each repository with the directory it lives in, which is what `-p` matches
 against.
 
+### Removing a repository
+
+```powershell
+pep skills remove group/sub/project
+```
+
+Deletes the skills that repository installed (in both the canonical directory and the linked one)
+and drops it from the list. It only removes what it installed itself — anything you put there by
+hand stays — and it needs no login, since nothing leaves the machine.
+
+### Two repositories, one skill name
+
+A skill's name is the folder name **inside** the repository, not the repository's own name. So two
+different repositories that each ship a `semi-integration/SKILL.md` both want
+`~/.agents/skills/semi-integration/`, and the second would silently overwrite the first.
+
+Adding a second such repository is refused, and the error names the one already there. If you
+already have a colliding pair from an older version, nothing breaks — every command reports it
+until you `remove` one:
+
+```
+⚠ 3 repositories all install "semi-integration" here:
+    https://git.example.com/team-a/skill
+    https://git.example.com/team-b/skill-testing
+  They overwrite each other. `pep skills remove <repo>` keeps just one.
+```
+
+Installing them into **different** directories is fine — that is what `-p` is for.
+
+`remove` leaves a shared skill's files on disk (which copy it is can no longer be told) and says
+so, rather than deleting what might be the other repository's content.
+
 ### Deleting a skill
 
 Delete a skill folder by hand and it **stays deleted**. `update` refreshes what is still on disk

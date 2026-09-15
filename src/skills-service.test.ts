@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { planSkillFiles, updateSkills } from "./skills-service.js";
+import { planSkillFiles, removeSkills, updateSkills } from "./skills-service.js";
 import type { SkillsState, SkillsStateStore } from "./types.js";
 import type { TarEntry } from "./tar.js";
 
@@ -189,6 +189,7 @@ describe("updateSkills —— 落盘", () => {
       status: "unchanged",
       name: "group/sub/repo",
       commit: COMMIT,
+      conflicts: [],
     });
     // 没解包：盘上那份还是原样，一个字节没被覆盖。
     expect(await readdir(directory)).toEqual(["a"]);
@@ -715,3 +716,154 @@ describe("盘上那份被用户删了", () => {
   });
 });
 
+
+// ═══ 两个仓给出同名 skill ═══════════════════════════════════════════════════
+//
+// skill 名就是落盘的目录名（`<canonical>/<skill 名>/`），所以同一个目录下两个包给出同名
+// skill 时后写的会盖掉先写的 —— 与包内同名是同一件事，只是这次两个名字来自两个仓。
+//
+// ⚠ 实测过的最坏形态：双方 commit 都没变 ⇒ 两边都走「unchanged」快路 ⇒ 两边都报「已经是
+// 最新了」，而盘上只有一份内容。**它永远不会自己暴露**，所以 conflicts 两条出口都要带。
+describe("跨包同名", () => {
+  const skillNamed = (body: string, commit: string) =>
+    archiveResponse({ [`${ROOT}/semi-integration/SKILL.md`]: body }, commit);
+
+  const installA = async (store: SkillsStateStore) =>
+    updateSkills(
+      deps(vi.fn().mockResolvedValue(skillNamed("我是 A", "a".repeat(40))), store, {}),
+    );
+
+  it("新撞上的 ⇒ 抛，一个字节都不写", async () => {
+    const store = memoryStateStore();
+    await updateSkills({ ...deps(vi.fn().mockResolvedValue(skillNamed("我是 A", "a".repeat(40))), store), source: "group/repo-a" });
+
+    await expect(
+      updateSkills({
+        ...deps(vi.fn().mockResolvedValue(skillNamed("我是 B", "b".repeat(40))), store),
+        source: "group/repo-b",
+      }),
+    ).rejects.toThrow(/group\/repo-a already installs a skill named "semi-integration"/);
+
+    // 抛之前什么都没写：A 的内容原封不动。
+    expect(await readFile(join(directory, "semi-integration", "SKILL.md"), "utf8")).toBe("我是 A");
+  });
+
+  it("报错里给得出出路（装到别处，或者先 remove）", async () => {
+    const store = memoryStateStore();
+    await updateSkills({ ...deps(vi.fn().mockResolvedValue(skillNamed("A", "a".repeat(40))), store), source: "group/repo-a" });
+    await expect(
+      updateSkills({ ...deps(vi.fn().mockResolvedValue(skillNamed("B", "b".repeat(40))), store), source: "group/repo-b" }),
+    ).rejects.toThrow(/--dir <path>.*pep skills remove group\/repo-a/s);
+  });
+
+  // ⚠ 落点不同就不算撞 —— 一个装个人级一个装项目级，本来互不相干。
+  it("两个包装在不同目录 ⇒ 不算撞，照装", async () => {
+    const elsewhere = await mkdtemp(join(tmpdir(), "pep-other-"));
+    const store = memoryStateStore();
+    await updateSkills({ ...deps(vi.fn().mockResolvedValue(skillNamed("A", "a".repeat(40))), store), source: "group/repo-a" });
+
+    const b = await updateSkills({
+      ...deps(vi.fn().mockResolvedValue(skillNamed("B", "b".repeat(40))), store, { directory: elsewhere }),
+      source: "group/repo-b",
+    });
+
+    expect(b.status).toBe("written");
+    expect(await readFile(join(elsewhere, "semi-integration", "SKILL.md"), "utf8")).toBe("B");
+  });
+
+  // ⚠ 存量的**只汇报不抛**：加这道检查时用户账上可能已经撞着了，直接抛等于给他一个
+  // 解不开的错 —— update 从此跑不动，而唯一的出路 remove 是同一版才有的。
+  it("存量撞名 ⇒ 不抛，但两条出口都要把它报出来", async () => {
+    // 手捏一本「已经撞上了」的账 —— 正是升级上来的用户的样子。
+    const store = memoryStateStore({
+      version: 4,
+      packages: {
+        "group/repo-a": { commit: "a".repeat(40), directory, skills: { "semi-integration": "h1" } },
+        "group/repo-b": { commit: "b".repeat(40), directory, skills: { "semi-integration": "h2" } },
+      },
+    });
+    await alreadyOnDisk(directory, "semi-integration");
+
+    // 出口一：commit 没变 ⇒ unchanged 快路。
+    const fast = await updateSkills({
+      ...deps(vi.fn().mockResolvedValue(skillNamed("B", "b".repeat(40))), store),
+      source: "group/repo-b",
+    });
+    expect(fast).toMatchObject({
+      status: "unchanged",
+      conflicts: [{ skill: "semi-integration", owner: "group/repo-a" }],
+    });
+
+    // 出口二：commit 变了 ⇒ 真写。照写，但仍要报。
+    const written = await updateSkills({
+      ...deps(vi.fn().mockResolvedValue(skillNamed("B2", "c".repeat(40))), store),
+      source: "group/repo-b",
+    });
+    expect(written).toMatchObject({
+      status: "written",
+      conflicts: [{ skill: "semi-integration", owner: "group/repo-a" }],
+    });
+  });
+});
+
+describe("removeSkills", () => {
+  const archiveOf = () =>
+    archiveResponse({
+      [`${ROOT}/skills/a/SKILL.md`]: "# a",
+      [`${ROOT}/skills/b/SKILL.md`]: "# b",
+    });
+
+  it("删掉它铺的那些，并从账上摘掉", async () => {
+    const link = await mkdtemp(join(tmpdir(), "pep-link-"));
+    const store = memoryStateStore();
+    await updateSkills(deps(vi.fn().mockResolvedValue(archiveOf()), store, { linkInto: link }));
+
+    const result = await removeSkills("group/sub/repo", store);
+
+    expect(result).toMatchObject({ deleted: ["a", "b"], keptForOthers: [] });
+    expect(await readdir(directory)).toEqual([]);
+    // canonical 与链接两处都清 —— 只清一边会留下一条指向空处的死链。
+    expect(await readdir(link)).toEqual([]);
+    expect(store.current?.packages["group/sub/repo"]).toBeUndefined();
+  });
+
+  it("别的包的账与文件一概不碰", async () => {
+    const store = memoryStateStore();
+    await updateSkills(deps(vi.fn().mockResolvedValue(archiveOf()), store));
+    // 用户自己放的东西。
+    await alreadyOnDisk(directory, "mine-by-hand");
+
+    await removeSkills("group/sub/repo", store);
+
+    expect(await readdir(directory)).toEqual(["mine-by-hand"]);
+  });
+
+  it("没装过的 ⇒ 说清楚，并指向 list", async () => {
+    await expect(removeSkills("group/never", memoryStateStore())).rejects.toThrow(
+      /Not added: group\/never.*pep skills list/s,
+    );
+  });
+
+  // ⚠ 撞名那一档**不删文件**：盘上那份归谁已经说不清（谁最后 update 谁赢），
+  // 删了就可能是在删另一个包的内容。
+  it("另一个包也占着这个名字 ⇒ 摘账、留文件、如实说", async () => {
+    const store = memoryStateStore({
+      version: 4,
+      packages: {
+        "group/repo-a": { directory, skills: { "semi-integration": "h1" } },
+        "group/repo-b": { directory, skills: { "semi-integration": "h2" } },
+      },
+    });
+    await alreadyOnDisk(directory, "semi-integration");
+
+    const result = await removeSkills("group/repo-b", store);
+
+    expect(result).toMatchObject({
+      deleted: [],
+      keptForOthers: [{ skill: "semi-integration", owner: "group/repo-a" }],
+    });
+    expect(await readdir(directory)).toEqual(["semi-integration"]);
+    expect(store.current?.packages["group/repo-b"]).toBeUndefined();
+    expect(store.current?.packages["group/repo-a"]).toBeDefined();
+  });
+});

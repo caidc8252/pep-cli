@@ -14,9 +14,17 @@ const SKILL_MANIFEST = "SKILL.md";
 /** 摊平后的一个文件：属于哪个 skill、在它目录里的相对路径。 */
 export type SkillFile = { skill: string; path: string; data: Uint8Array };
 
+/**
+ * 「这个 skill 名，账上还有**别的包**也占着」。
+ *
+ * skill 名就是落盘的目录名（`<canonical>/<skill 名>/`），所以同一个目录下两个包给出同名
+ * skill 时，后写的会盖掉先写的 —— 与包内同名是同一件事，见 `planSkillFiles` 的那段注释。
+ */
+export type SkillConflict = { skill: string; owner: string };
+
 export type SkillsUpdateResult =
   /** 仓库提交没变，连包都没下 —— 体在读完之前就掐了。 */
-  | { status: "unchanged"; name: string; commit: string }
+  | { status: "unchanged"; name: string; commit: string; conflicts: SkillConflict[] }
   | {
       status: "written";
       name: string;
@@ -30,6 +38,8 @@ export type SkillsUpdateResult =
       removed: string[];
       /** 账上有、盘上已被用户删掉，因而这次**没去碰**的那些（只有 `update` 会有）。 */
       skipped: string[];
+      /** 与别的包撞了名字的那些 —— **存量**才到这儿，新撞的直接抛。 */
+      conflicts: SkillConflict[];
       directory: string;
       /** 接进了哪个 agent 目录（`--dir` 显式指定时不接，为 undefined）。 */
       linkedInto?: string;
@@ -265,6 +275,62 @@ function hashSkill(files: readonly SkillFile[]): string {
  * ⚠ 哈希只用来**汇报**，不用来决定写不写：commit 变了就整包重写。省那几次写盘换来的是
  * 「本地被人手改过却报 unchanged」这种查不出的状态 —— 不值。
  */
+export type SkillsRemoveResult = {
+  name: string;
+  /** 真的删掉了的那些。 */
+  deleted: string[];
+  /**
+   * 账上摘了，但**文件留着没动**的那些 —— 另一个包也占着这个名字（存量撞名）。
+   * 那份文件到底是谁的已经说不清，删了就可能是在删别人的东西。
+   */
+  keptForOthers: SkillConflict[];
+  directory: string;
+};
+
+/**
+ * 把一个包从账上摘掉，并删掉**它铺出来的**那些 skill。
+ *
+ * 纯本地操作，不打网络 —— 所以调用它不需要令牌（见 cli.ts 里它被放在取令牌之前）。
+ *
+ * ⚠ 只删**账上记在这个包名下**的那几个目录。用户自己放的、别的包铺的，一概不碰 ——
+ * 与 `update` 的清理同一口径。
+ *
+ * ⚠ 撞名那一档**不删文件**：盘上那一份到底是谁写的已经说不清（谁最后 update 谁就赢），
+ * 删了就可能是在删另一个包的内容。摘账、留文件、如实说出来，让用户自己决定。
+ */
+export async function removeSkills(
+  name: string,
+  store: SkillsStateStore,
+): Promise<SkillsRemoveResult> {
+  const state = await store.read();
+  const pkg = state?.packages[name];
+  if (!state || !pkg) {
+    throw new Error(`Not added: ${name}. Run \`pep skills list\` to see what is.`);
+  }
+
+  const deleted: string[] = [];
+  const keptForOthers: SkillConflict[] = [];
+  for (const skill of Object.keys(pkg.skills).sort()) {
+    const owner = Object.entries(state.packages).find(
+      ([other, one]) => other !== name && one.directory === pkg.directory && skill in one.skills,
+    )?.[0];
+    if (owner !== undefined) {
+      keptForOthers.push({ skill, owner });
+      continue;
+    }
+    await rm(join(pkg.directory, skill), { recursive: true, force: true });
+    // canonical 与链接两处都要清：只清一边会留下一条指向空处的死链。
+    if (pkg.linkedInto !== undefined) {
+      await rm(join(pkg.linkedInto, skill), { recursive: true, force: true });
+    }
+    deleted.push(skill);
+  }
+
+  const { [name]: _dropped, ...rest } = state.packages;
+  await store.write({ version: 4, packages: rest });
+  return { name, deleted, keptForOthers, directory: pkg.directory };
+}
+
 /**
  * 账上记着、但盘上**已经不在**的那些 —— 也就是「用户自己删掉的」。
  *
@@ -318,6 +384,17 @@ export async function updateSkills(
   const sameTarget =
     previous?.directory === dependencies.directory &&
     previous?.linkedInto === dependencies.linkInto;
+  /**
+   * 这个 skill 名在**同一个目录**下有没有被别的包占着。
+   *
+   * ⚠ 只有落点相同才算撞 —— 两个包各装各的目录（一个个人级一个项目级）本来就互不相干。
+   */
+  const claimedElsewhere = (skill: string): string | undefined =>
+    Object.entries(state?.packages ?? {}).find(
+      ([other, pkg]) =>
+        other !== name && pkg.directory === dependencies.directory && skill in pkg.skills,
+    )?.[0];
+
   // 账上记着、盘上已经没了的那些 —— 用户自己删掉的。**两条命令对它的态度相反**，见
   // `restoreMissing` 的注释。
   const gone =
@@ -328,11 +405,19 @@ export async function updateSkills(
   // ⚠ `add` 在**有东西被删掉**时不许走快路 —— 它的职责就是把那些补回来。`update` 则照走：
   // 删掉的东西它本来就不该复活。
   const nothingToRestore = !dependencies.restoreMissing || gone.size === 0;
+  // ⚠ 撞名要在**快路之前**算出来，而且 `unchanged` 也得带着它回去。存量冲突下双方的
+  // commit 通常都没变 ⇒ 两边都走快路 ⇒ 两边都报「已经是最新了」，而盘上只有一份内容。
+  // 那正是这件事最坏的形态：**它永远不会自己暴露**。
+  const standing = Object.keys(previous?.skills ?? {}).flatMap((skill) => {
+    const owner = claimedElsewhere(skill);
+    return owner ? [{ skill, owner }] : [];
+  });
+
   if (commit !== undefined && commit === previous?.commit && sameTarget && nothingToRestore) {
     // 已经是这一版了。体还没读完就掐掉，省下传输 —— 这是个半吊子的省法，真要省该是
     // 条件请求（CLI 带 If-None-Match、PEP 答 304），但 PEP 那侧还没做。
     await response.body?.cancel();
-    return { status: "unchanged", name, commit };
+    return { status: "unchanged", name, commit, conflicts: standing };
   }
 
   const gzipped = new Uint8Array(await response.arrayBuffer());
@@ -371,6 +456,31 @@ export async function updateSkills(
     if (gone.has(skill)) updated.push(skill);
     else if (before !== undefined && before !== "" && before === hash) unchanged.push(skill);
     else updated.push(skill);
+  }
+
+  // ── 跨包同名：新撞的抛，存量的放行但要汇报 ──────────────────────────────────
+  // ⚠ 与包内同名同一个道理（见 `planSkillFiles` 那段注释），只是这次两个名字来自两个仓：
+  // 后写的盖掉先写的，而两边的账都认为那个目录是自己的 —— 于是谁先 update 谁就赢，
+  // 上游哪天删掉它，清理还会把另一份一起删了。静默，所以必须抛。
+  //
+  // ⚠ **存量的只汇报不抛**：加这道检查时用户账上可能已经撞着了（我们自己就有三条），
+  // 直接抛等于给他一个解不开的错 —— 那会让 `update` 从此跑不动，而唯一的出路
+  // `skills remove` 是同一版才有的。判据是「这个名字**以前就记在我自己账上**」：
+  // 记过 = 装这一版之前就撞了，没记过 = 这一次新撞的。
+  const conflicts: SkillConflict[] = [];
+  for (const skill of skills) {
+    const owner = claimedElsewhere(skill);
+    if (owner === undefined) continue;
+    if (previous !== undefined && skill in previous.skills) {
+      conflicts.push({ skill, owner });
+      continue;
+    }
+    throw new Error(
+      `${owner} already installs a skill named "${skill}" in ${dependencies.directory}. ` +
+        `Two repositories cannot both provide "${skill}" there — the second would silently ` +
+        `overwrite the first. Install this one elsewhere (-p, or --dir <path>), ` +
+        `or run \`pep skills remove ${owner}\` first.`,
+    );
   }
 
   // ── 先按**旧账**清一遍 ──────────────────────────────────────────────────────
@@ -443,6 +553,7 @@ export async function updateSkills(
     fileCount: files.filter((one) => !skipped.includes(one.skill)).length,
     removed,
     skipped,
+    conflicts,
     directory: dependencies.directory,
     ...(dependencies.linkInto !== undefined ? { linkedInto: dependencies.linkInto } : {}),
     ...(copiedCount > 0 ? { copiedCount } : {}),

@@ -21,7 +21,7 @@ import { createOAuthClient } from "./oauth-client.js";
 import { fetchDocContent, fetchDocsIndex } from "./docs-service.js";
 import { USERNAME_VAR, PASSWORD_VAR } from "./maven-env.js";
 import { setupNexusCredential } from "./nexus-service.js";
-import { updateSkills, type SkillsUpdateResult } from "./skills-service.js";
+import { removeSkills, updateSkills, type SkillsUpdateResult } from "./skills-service.js";
 import type { CliConfig, ConfigStore } from "./types.js";
 
 declare const __PEP_VERSION__: string | undefined;
@@ -39,6 +39,7 @@ Usage:
   pep skills list
   pep skills add <repo-url | group/project[@ref]> [-p | --dir <path>]
   pep skills update [<repo>...] [-p | --dir <path>]
+  pep skills remove <repo>
   pep docs list [--docs-url <url>]
   pep docs get <path> [--docs-url <url>]
   pep nexus setup
@@ -83,6 +84,14 @@ it already lives and never moves anything. On update, -p and --dir instead NARRO
 repositories installed there: \`pep skills update -p\` refreshes only this project's, and reports
 nothing to do when the project has none. To move a repository, add it again with the new flag —
 add is where the location is decided, and the copy in the old location is then removed.
+\`pep skills remove <repo>\` deletes the skills that repository installed and drops it from the
+list. It only removes what it installed itself, and it needs no login. A skill that another
+repository also installs is left on disk (which copy it is can no longer be told) and reported.
+
+Two repositories cannot both provide a skill with the SAME NAME in one directory — the skill name
+is the folder name inside the repository, so they would overwrite each other. Adding a second one
+is refused; if you already have such a pair, every command says so until you remove one.
+
 Delete a skill folder by hand and update LEAVES IT DELETED — it refreshes what is still there and
 reports the ones it left alone. Run \`pep skills add <repo>\` to put them back; add is the command
 that installs. Either way update only touches skills it wrote itself; anything you put there by
@@ -105,8 +114,17 @@ handing it out again.`;
 
 /** 一次更新的汇报。`add` 与 `update` 共用 —— 两者的产出形状本来就一样。 */
 function reportUpdate(result: SkillsUpdateResult): void {
+  // ⚠ 撞名要在**两条出口上都报**。存量冲突下双方的 commit 通常都没变 ⇒ 两边都走
+  // 「unchanged」那条快路 ⇒ 只在另一条出口报的话，这件事一次都不会被说出来。
+  const conflicts = () => {
+    for (const { skill, owner } of result.conflicts) {
+      console.error(`  ⚠ "${skill}" is also installed here by ${owner} — they overwrite`);
+      console.error(`    each other. \`pep skills remove\` one of them to settle it.`);
+    }
+  };
   if (result.status === "unchanged") {
     console.log(`${result.name}: already at ${result.commit}. Nothing to do.`);
+    conflicts();
     return;
   }
   // ⚠ 先说**哪些 skill 真的变了** —— 那是用户来看这行输出的原因。仓库动了别处
@@ -125,6 +143,7 @@ function reportUpdate(result: SkillsUpdateResult): void {
     console.log(`  deleted locally, left alone: ${result.skipped.join(" ")}`);
     console.log(`  (\`pep skills add ${result.name}\` puts them back)`);
   }
+  conflicts();
   console.log(`  ${result.fileCount} file(s) in ${result.directory}`);
   if (result.linkedInto !== undefined) {
     // 两行分开说：一行是「22 家共读的那份」，一行是「额外接给 Claude Code 的那条」。
@@ -233,12 +252,15 @@ export async function loginConfig(
  * **无论怎么写都报「--dir requires a value.」**（2026-09-15 实测确认，钉在 cli.test.ts）。
  */
 export function parseSkillsArgs(
-  command: "add" | "update" | "list",
+  command: "add" | "update" | "list" | "remove",
   args: string[],
   cwd?: string,
 ): { requested?: string; named: string[]; chosenTarget?: SkillsTarget } {
-  const explicitDirectory = command === "list" ? undefined : option(args, "--dir");
-  const project = command === "list" ? false : flag(args, "--project", "-p");
+  // `list` / `remove` 都不收落点选项：前者不写盘，后者的落点**只能**来自账本 ——
+  // 让调用方指一个目录去删，等于让他指着一个我们没记过的地方删文件。
+  const local = command === "list" || command === "remove";
+  const explicitDirectory = local ? undefined : option(args, "--dir");
+  const project = local ? false : flag(args, "--project", "-p");
   if (explicitDirectory !== undefined && project) {
     // 两个都给 = 两个互相矛盾的落点。挑一个去执行等于替用户猜，而猜错是静默铺错地方。
     throw new Error("--dir and --project/-p cannot be used together: they name different places.");
@@ -249,10 +271,15 @@ export function parseSkillsArgs(
   const unknownOption = args.find((one) => one.startsWith("-"));
   if (unknownOption) throw new Error(`Unknown option: ${unknownOption}`);
 
-  // `add` 收恰好一个位置参数；`update` 收零个或多个（零个 = 全部已装的）；`list` 一个不收。
-  const requested = command === "add" ? args.shift() : undefined;
+  // `add` / `remove` 各收恰好一个位置参数；`update` 收零个或多个（零个 = 全部已装的）；
+  // `list` 一个不收。
+  const takesOne = command === "add" || command === "remove";
+  const requested = takesOne ? args.shift() : undefined;
   if (command === "add" && !requested) {
     throw new Error("pep skills add needs a repository: a full https URL, or <group>/<project>.");
+  }
+  if (command === "remove" && !requested) {
+    throw new Error("pep skills remove needs a repository. Run `pep skills list` to see them.");
   }
   const named = command === "update" ? [...args] : [];
   if (command !== "update" && args.length > 0) {
@@ -392,21 +419,26 @@ export async function main(): Promise<void> {
   }
 
   if (group === "skills") {
-    if (command !== "update" && command !== "add" && command !== "list") {
+    if (
+      command !== "update" &&
+      command !== "add" &&
+      command !== "list" &&
+      command !== "remove"
+    ) {
       throw new Error(`Unknown skills command.\n\n${usage()}`);
     }
     const { requested, named, chosenTarget } = parseSkillsArgs(command, args);
 
-    // currentAuthorization 会在令牌快过期时先刷新 —— 同步是一次可能不短的下载，拿一枚
-    // 马上就到期的令牌出门没有意义。
-    const authorization = await auth.currentAuthorization();
-    const remote = { issuer: authorization.issuer, accessToken: authorization.accessToken };
+    // ── 先办纯本地的两条：`list` / `remove` ──────────────────────────────────
+    // ⚠ 它们**不该要令牌**：一个读本地账本，一个删本地文件，都不打网络。放在取令牌之后
+    // 的话，一个只想清掉一条记录的人会先被弹去登录 —— 而他要清的东西就在自己盘上。
+    const stateStore = fileSkillsStateStore();
 
     if (command === "list") {
       // ⚠ 列的是**你装过什么**，不是「平台提供什么」—— 后者已经没有出处了：仓由调用方
       // 指定，PEP 只判主机，不再维护一张下发目录。硬编一个「推荐清单」等于把那张表挪个
       // 地方，而它迟早与现实分叉。
-      const listed = await fileSkillsStateStore().read();
+      const listed = await stateStore.read();
       const packages = Object.entries(listed?.packages ?? {}).sort(([a], [b]) =>
         a.localeCompare(b),
       );
@@ -417,11 +449,44 @@ export async function main(): Promise<void> {
       // 落点也列出来。有了项目级之后「这个仓装在哪儿」就是看这张表的主要理由，
       // 也是**唯一**能看出 `update -p` 会命中哪几行的地方。制表符分隔，与 `docs list` 同形。
       for (const [source, pkg] of packages) console.log(`${source}\t${pkg.directory}`);
+      // 撞名的逐行点出来 —— 它们在盘上是同一个目录，谁最后 update 谁赢。
+      const byPlace = new Map<string, string[]>();
+      for (const [source, pkg] of packages) {
+        for (const skill of Object.keys(pkg.skills)) {
+          const key = `${pkg.directory}\u0000${skill}`;
+          byPlace.set(key, [...(byPlace.get(key) ?? []), source]);
+        }
+      }
+      for (const [key, owners] of byPlace) {
+        if (owners.length < 2) continue;
+        const skill = key.split("\u0000")[1] as string;
+        console.error(`\n⚠ ${owners.length} repositories all install "${skill}" here:`);
+        for (const one of owners) console.error(`    ${one}`);
+        console.error("  They overwrite each other. `pep skills remove <repo>` keeps just one.");
+      }
       console.error("\n`pep skills update` refreshes all of them, each where it lives.");
       return;
     }
 
-    const stateStore = fileSkillsStateStore();
+    if (command === "remove") {
+      const result = await removeSkills(requested as string, stateStore);
+      console.log(
+        result.deleted.length > 0
+          ? `${result.name}: removed ${result.deleted.join(" ")} from ${result.directory}`
+          : `${result.name}: nothing on disk to delete; dropped it from the list`,
+      );
+      // ⚠ 撞名那一档必须说出来：账摘了、文件还在，而那份文件归谁已经说不清。
+      for (const { skill, owner } of result.keptForOthers) {
+        console.error(`  kept "${skill}" — ${owner} also installs it here`);
+      }
+      return;
+    }
+
+    // currentAuthorization 会在令牌快过期时先刷新 —— 同步是一次可能不短的下载，拿一枚
+    // 马上就到期的令牌出门没有意义。
+    const authorization = await auth.currentAuthorization();
+    const remote = { issuer: authorization.issuer, accessToken: authorization.accessToken };
+
     const state = await stateStore.read();
     const installed = Object.keys(state?.packages ?? {}).sort();
 
