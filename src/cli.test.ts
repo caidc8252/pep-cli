@@ -136,6 +136,44 @@ describe("parseSkillsArgs —— --project", () => {
     ]);
   });
 
+  it("-p 是 --project 的短写，两者等价", () => {
+    const short = parseSkillsArgs("add", ["group/repo", "-p"], "/work/app");
+    const long = parseSkillsArgs("add", ["group/repo", "--project"], "/work/app");
+    expect(short).toEqual(long);
+    expect(short.chosenTarget?.directory).toBe(join("/work/app", ".agents", "skills"));
+  });
+
+  it("-p 同样不会被当成位置参数", () => {
+    expect(parseSkillsArgs("update", ["-p", "group/repo"], "/w").named).toEqual(["group/repo"]);
+  });
+
+  // 多敲一次不算错 —— 残下一个的话会被报成「不认识的选项」，而用户只是手抖。
+  it.each([
+    ["-p -p", ["-p", "-p"]],
+    ["-p --project 混着给", ["-p", "--project"]],
+  ])("重复给同一个开关（%s）⇒ 摘干净，不报错", (_label, flags) => {
+    const parsed = parseSkillsArgs("update", [...flags, "group/repo"], "/w");
+    expect(parsed.named).toEqual(["group/repo"]);
+    expect(parsed.chosenTarget?.directory).toBe(join("/w", ".agents", "skills"));
+  });
+
+  it("-p 与 --dir 同时给 ⇒ 一样拒", () => {
+    expect(() => parseSkillsArgs("add", ["g/r", "-p", "--dir", "/tmp/x"])).toThrow(
+      /cannot be used together/,
+    );
+  });
+
+  // ⚠ 短选项进来之后，只判双横线会让 `-x` 漏过去、被当成一个仓库名 —— 于是报「取不到
+  // 这个仓」，那句话指向 GitLab，而错在命令行。
+  it("不认识的短选项 ⇒ 报成选项，不会被当成仓库名", () => {
+    expect(() => parseSkillsArgs("update", ["-x"])).toThrow(/Unknown option: -x/);
+    expect(() => parseSkillsArgs("add", ["-x"])).toThrow(/Unknown option: -x/);
+  });
+
+  it("list 也不收 -p", () => {
+    expect(() => parseSkillsArgs("list", ["-p"])).toThrow(/Unknown option/);
+  });
+
   // ⚠ 两个都给 = 两个互相矛盾的落点。挑一个去执行等于替用户猜，而猜错是**静默**铺错地方。
   it("--project 与 --dir 同时给 ⇒ 拒，不猜", () => {
     expect(() => parseSkillsArgs("add", ["g/r", "--project", "--dir", "/tmp/x"])).toThrow(

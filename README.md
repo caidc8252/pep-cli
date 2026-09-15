@@ -90,6 +90,7 @@ pep skills add https://git.newlandpayment.com/group/sub/project   # or group/sub
 pep skills list
 pep skills update                                                 # all of them
 pep skills update group/sub/project                               # just this one
+pep skills add group/sub/project -p                               # into THIS project
 ```
 
 PEP fetches the repository with its own read-only service account, so no GitLab credential ever
@@ -102,7 +103,7 @@ repository may hold several skills: every directory containing a `SKILL.md` beco
 | Scope       | Flag        | Canonical copy            | Linked into                |
 | ----------- | ----------- | ------------------------- | -------------------------- |
 | **Personal**| (default)   | `~/.agents/skills/`       | `~/.claude/skills/`        |
-| **Project** | `--project` | `./.agents/skills/`       | `./.claude/skills/`        |
+| **Project** | `-p`, `--project` | `./.agents/skills/`       | `./.claude/skills/`        |
 | **Raw**     | `--dir <p>` | `<p>/`                    | nothing — linking skipped  |
 
 `~/.agents/skills` is the cross-agent convention that Codex, Cursor, Amp and ~20 others read
@@ -112,10 +113,10 @@ directory, matching what `npx skills` installs at project scope.
 
 Personal is the default because the project directories get committed: whether a synced skill
 counts as a change, and whether to gitignore it, is a question every repository would otherwise
-have to answer. Use `--project` when the skills genuinely belong to one repository.
+have to answer. Use `-p` when the skills genuinely belong to one repository.
 
 **The location is remembered per repository.** A later `pep skills update` with no flags puts each
-repository back where it was. Passing `--project` or `--dir` to `update` *moves* that repository,
+repository back where it was. Passing `-p` or `--dir` to `update` *moves* that repository,
 and the copy in the old location is removed.
 
 `pep auth token` writes only the access token to stdout, so agents can use it without parsing status

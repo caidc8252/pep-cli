@@ -37,8 +37,8 @@ Usage:
   pep auth token
   pep auth logout
   pep skills list
-  pep skills add <repo-url | group/project[@ref]> [--project | --dir <path>]
-  pep skills update [<repo>...] [--project | --dir <path>]
+  pep skills add <repo-url | group/project[@ref]> [-p | --dir <path>]
+  pep skills update [<repo>...] [-p | --dir <path>]
   pep docs list [--docs-url <url>]
   pep docs get <path> [--docs-url <url>]
   pep nexus setup
@@ -70,7 +70,7 @@ directly. Claude Code keeps its own directory, so each skill is also linked into
 ${claudeSkillsDirectory()} — one copy on disk, updated in one place. Where links are not
 available the skill is copied instead and the run says so.
 
---project installs into the CURRENT PROJECT instead: ./.agents/skills plus the same link into
+-p, --project installs into the CURRENT PROJECT instead: ./.agents/skills plus the same link into
 ./.claude/skills. Use it when the skills belong to one repository and should be committed with
 it; note both directories then show up in git status, which is why the personal location is the
 default.
@@ -79,7 +79,7 @@ default.
 directory.
 
 Where a repository was installed is remembered per repository, so a later \`pep skills update\`
-puts it back in the same place with no flags. Passing --project or --dir to update MOVES it, and
+puts it back in the same place with no flags. Passing -p or --dir to update MOVES it, and
 the copy in the old location is removed. Either way update only touches skills it wrote itself;
 anything you put there by hand is left alone.
 
@@ -142,12 +142,20 @@ function repeatedOption(args: string[], name: string): string[] {
   }
 }
 
-/** 摘一个布尔开关。给了就从 `args` 里拿掉，好让剩下的按位置参数处理。 */
-function flag(args: string[], name: string): boolean {
-  const index = args.indexOf(name);
-  if (index === -1) return false;
-  args.splice(index, 1);
-  return true;
+/**
+ * 摘一个布尔开关（可以有多个拼法，长短形式都收）。给了就从 `args` 里拿掉，好让剩下的
+ * 按位置参数处理。重复给同一个开关不算错 —— 一律摘干净，否则残下的那个会被当成「不认识
+ * 的选项」报出来，而用户只是多敲了一次。
+ */
+function flag(args: string[], ...names: string[]): boolean {
+  let found = false;
+  for (const name of names) {
+    for (let index = args.indexOf(name); index !== -1; index = args.indexOf(name)) {
+      args.splice(index, 1);
+      found = true;
+    }
+  }
+  return found;
 }
 
 function option(args: string[], name: string): string | undefined {
@@ -219,13 +227,15 @@ export function parseSkillsArgs(
   cwd?: string,
 ): { requested?: string; named: string[]; chosenTarget?: SkillsTarget } {
   const explicitDirectory = command === "list" ? undefined : option(args, "--dir");
-  const project = command === "list" ? false : flag(args, "--project");
+  const project = command === "list" ? false : flag(args, "--project", "-p");
   if (explicitDirectory !== undefined && project) {
     // 两个都给 = 两个互相矛盾的落点。挑一个去执行等于替用户猜，而猜错是静默铺错地方。
-    throw new Error("--dir and --project cannot be used together: they name different places.");
+    throw new Error("--dir and --project/-p cannot be used together: they name different places.");
   }
-  // 选项摘完，剩下还以 `--` 开头的就是不认识的。
-  const unknownOption = args.find((one) => one.startsWith("--"));
+  // 选项摘完，剩下还以 `-` 开头的就是不认识的。⚠ 判 `-` 而不是 `--`：短选项进来之后，
+  // 只判双横线会让 `-x` 这种笔误漏过去、被当成一个仓库名，于是报「取不到这个仓」——
+  // 那句话指向的是 GitLab，而错在命令行。仓库路径不会以 `-` 开头，这里不会误伤。
+  const unknownOption = args.find((one) => one.startsWith("-"));
   if (unknownOption) throw new Error(`Unknown option: ${unknownOption}`);
 
   // `add` 收恰好一个位置参数；`update` 收零个或多个（零个 = 全部已装的）；`list` 一个不收。
