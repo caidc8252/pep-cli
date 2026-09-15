@@ -21,7 +21,7 @@ import { createOAuthClient } from "./oauth-client.js";
 import { fetchDocContent, fetchDocsIndex } from "./docs-service.js";
 import { USERNAME_VAR, PASSWORD_VAR } from "./maven-env.js";
 import { setupNexusCredential } from "./nexus-service.js";
-import { installedPackages, updateSkills, type SkillsUpdateResult } from "./skills-service.js";
+import { updateSkills, type SkillsUpdateResult } from "./skills-service.js";
 import type { CliConfig, ConfigStore } from "./types.js";
 
 declare const __PEP_VERSION__: string | undefined;
@@ -78,10 +78,12 @@ default.
 --dir <path> writes to that path ONLY and skips the linking, for an agent that reads neither
 directory.
 
-Where a repository was installed is remembered per repository, so a later \`pep skills update\`
-puts it back in the same place with no flags. Passing -p or --dir to update MOVES it, and
-the copy in the old location is removed. Either way update only touches skills it wrote itself;
-anything you put there by hand is left alone.
+Where a repository was installed is remembered, so \`pep skills update\` refreshes each one where
+it already lives and never moves anything. On update, -p and --dir instead NARROW the run to the
+repositories installed there: \`pep skills update -p\` refreshes only this project's, and reports
+nothing to do when the project has none. To move a repository, add it again with the new flag —
+add is where the location is decided, and the copy in the old location is then removed.
+Either way update only touches skills it wrote itself; anything you put there by hand is left alone.
 
 \`pep docs list\` prints the documents this account can read (path + description); feed a path
 straight to \`pep docs get\` to print that document as markdown on stdout. The documentation
@@ -395,21 +397,44 @@ export async function main(): Promise<void> {
       // ⚠ 列的是**你装过什么**，不是「平台提供什么」—— 后者已经没有出处了：仓由调用方
       // 指定，PEP 只判主机，不再维护一张下发目录。硬编一个「推荐清单」等于把那张表挪个
       // 地方，而它迟早与现实分叉。
-      const installed = await installedPackages(fileSkillsStateStore());
-      if (installed.length === 0) {
+      const listed = await fileSkillsStateStore().read();
+      const packages = Object.entries(listed?.packages ?? {}).sort(([a], [b]) =>
+        a.localeCompare(b),
+      );
+      if (packages.length === 0) {
         console.error("Nothing added yet. Run `pep skills add <repo>`.");
         return;
       }
-      for (const one of installed) console.log(one);
-      console.error("\n`pep skills update` refreshes all of them.");
+      // 落点也列出来。有了项目级之后「这个仓装在哪儿」就是看这张表的主要理由，
+      // 也是**唯一**能看出 `update -p` 会命中哪几行的地方。制表符分隔，与 `docs list` 同形。
+      for (const [source, pkg] of packages) console.log(`${source}\t${pkg.directory}`);
+      console.error("\n`pep skills update` refreshes all of them, each where it lives.");
       return;
     }
 
     const stateStore = fileSkillsStateStore();
-    const installed = await installedPackages(stateStore);
-    const targets =
-      command === "add" ? [requested as string] : named.length > 0 ? named : installed;
-    if (targets.length === 0) {
+    const state = await stateStore.read();
+    const installed = Object.keys(state?.packages ?? {}).sort();
+
+    const run = async (source: string, target: SkillsTarget) =>
+      reportUpdate(
+        await updateSkills({
+          ...remote,
+          source,
+          directory: target.directory,
+          ...(target.linkInto !== undefined ? { linkInto: target.linkInto } : {}),
+          stateStore,
+        }),
+      );
+
+    if (command === "add") {
+      // `add` 是「**放哪儿**」这个决定的唯一出口：本次显式给的赢，没给就沿用账上记的
+      // （重复 add 同一个仓不会把它搬走），再没有就个人级默认。
+      await run(requested as string, targetForSource(chosenTarget, state?.packages[requested as string]));
+      return;
+    }
+
+    if (installed.length === 0) {
       // `update` 而账上一个都没有：不猜一个默认值去装，那会替用户做决定。
       console.error("Nothing added yet. Run `pep skills add <repo>`.");
       return;
@@ -423,17 +448,33 @@ export async function main(): Promise<void> {
       );
     }
 
-    const state = await stateStore.read();
+    // ⚠ **`update` 的 `-p` / `--dir` 是筛子，不是搬家。** 与 `npx skills` 同口径 —— 那边
+    // `-p` 也是「只更新项目里的那些」。放哪儿只由 `add` 决定。
+    //
+    // 〔2026-09-15 补。此前它被当成落点，而 `update` 不点名时的目标是**账上所有包** ——
+    // 于是在一个还没装过任何 skill 的项目里敲一下 `pep skills update -p`，个人级那些会被
+    // 整体搬进这个项目、原处删掉。没人会想要那个，而且它不可逆。〕
+    const wanted = named.length > 0 ? named : installed;
+    const targets = chosenTarget
+      ? wanted.filter((one) => state?.packages[one]?.directory === chosenTarget.directory)
+      : wanted;
+
+    if (targets.length === 0) {
+      // 筛没了。**说清楚筛的是哪儿**，否则看起来像「什么都没发生」。
+      console.error(`No skills are installed in ${chosenTarget?.directory}.`);
+      console.error("`pep skills update` (no flag) refreshes every repository where it lives;");
+      console.error("`pep skills add <repo> -p` installs one into this project.");
+      return;
+    }
+    // 点了名却不在这个范围里的，逐个说出来 —— 默默跳过会让人以为已经更新了。
+    const skipped = wanted.filter((one) => !targets.includes(one));
+    if (skipped.length > 0) {
+      console.error(`Not installed in ${chosenTarget?.directory}, skipped: ${skipped.join(" ")}`);
+    }
+
     for (const source of targets) {
-      const target = targetForSource(chosenTarget, state?.packages[source]);
-      const result = await updateSkills({
-        ...remote,
-        source,
-        directory: target.directory,
-        ...(target.linkInto !== undefined ? { linkInto: target.linkInto } : {}),
-        stateStore,
-      });
-      reportUpdate(result);
+      // 落点一律取**账上记的** —— `update` 不搬家，理由见上面那段。
+      await run(source, targetForSource(undefined, state?.packages[source]));
     }
     return;
   }

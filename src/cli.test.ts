@@ -7,6 +7,7 @@ import {
   DEFAULT_CLIENT_ID,
   DEFAULT_ISSUER,
   DEFAULT_RESOURCES,
+  projectSkillsTarget,
 } from "./config.js";
 import type { CliConfig, ConfigStore } from "./types.js";
 
@@ -219,5 +220,68 @@ describe("targetForSource —— 显式 > 账上 > 个人级", () => {
     expect(targetForSource(undefined, { directory: "/only-here" })).toEqual({
       directory: "/only-here",
     });
+  });
+});
+
+// ═══ update 的 -p 是筛子，不是搬家 ═════════════════════════════════════════
+//
+// ⚠ 这一组钉的是一个**差点发出去的破坏性行为**。此前 `-p` 被当成落点，而 `update` 不点名
+// 时的目标是**账上所有包** —— 于是在一个还没装过任何 skill 的项目里敲一下
+// `pep skills update -p`，个人级那些会被整体搬进这个项目、原处删掉。没人会想要那个，
+// 而且它不可逆。现在 `update` 的落点一律取账上记的，`-p` 只负责筛。
+//
+// 与 `npx skills` 同口径：那边 `-p` 也是「只更新项目里的那些」，放哪儿由 add 决定。
+describe("update 的落点只读账，不被 -p 改写", () => {
+  const personal = {
+    directory: join("/home/me", ".agents", "skills"),
+    linkedInto: join("/home/me", ".claude", "skills"),
+  };
+
+  it("targetForSource 拿 undefined 当 chosen ⇒ 原样回账上那份", () => {
+    expect(targetForSource(undefined, personal)).toEqual({
+      directory: personal.directory,
+      linkInto: personal.linkedInto,
+    });
+  });
+
+  // 这条描述的是**如果**把 chosenTarget 传进去会发生什么 —— 即被修掉的那个行为。
+  // 留着它是为了写明「为什么 update 那条路必须传 undefined」。
+  it("把 chosenTarget 传进去就会改写落点 —— 所以 update 那条路不能传", () => {
+    const project = projectSkillsTarget("/work/app");
+    expect(targetForSource(project, personal).directory).toBe(
+      join("/work/app", ".agents", "skills"),
+    );
+    expect(targetForSource(project, personal).directory).not.toBe(personal.directory);
+  });
+});
+
+describe("update 的范围筛选", () => {
+  // `cli.ts` 里那一句 filter 的判据：账上记的 directory 与 -p 算出来的完全相等。
+  const inScope = (
+    wanted: string[],
+    packages: Record<string, { directory: string }>,
+    scope: string,
+  ) => wanted.filter((one) => packages[one]?.directory === scope);
+
+  const project = projectSkillsTarget("/work/app").directory;
+  const packages = {
+    "g/personal": { directory: join("/home/me", ".agents", "skills") },
+    "g/here": { directory: project },
+    "g/other-project": { directory: join("/work/other", ".agents", "skills") },
+  };
+
+  it("只留下装在当前项目里的那些", () => {
+    expect(inScope(Object.keys(packages), packages, project)).toEqual(["g/here"]);
+  });
+
+  // 这正是本次提问的那个情形：项目里一个都没有。必须是「筛出空集」⇒ 什么都不做，
+  // 而不是「把所有包搬进来」。
+  it("项目里一个都没有 ⇒ 筛出空集（于是什么都不做）", () => {
+    const empty = { "g/personal": packages["g/personal"] };
+    expect(inScope(Object.keys(empty), empty, project)).toEqual([]);
+  });
+
+  it("点名了但不在这个范围里 ⇒ 也被筛掉（调用方据此报 skipped）", () => {
+    expect(inScope(["g/personal"], packages, project)).toEqual([]);
   });
 });

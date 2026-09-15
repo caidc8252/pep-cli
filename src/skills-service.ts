@@ -379,8 +379,3 @@ export async function updateSkills(
   };
 }
 
-/** 账上记着装过哪些包 —— `update` 不给参数时靠它知道该刷新谁。 */
-export async function installedPackages(store: SkillsStateStore): Promise<string[]> {
-  const state = await store.read();
-  return Object.keys(state?.packages ?? {}).sort();
-}

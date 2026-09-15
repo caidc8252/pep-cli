@@ -115,9 +115,27 @@ Personal is the default because the project directories get committed: whether a
 counts as a change, and whether to gitignore it, is a question every repository would otherwise
 have to answer. Use `-p` when the skills genuinely belong to one repository.
 
-**The location is remembered per repository.** A later `pep skills update` with no flags puts each
-repository back where it was. Passing `-p` or `--dir` to `update` *moves* that repository,
-and the copy in the old location is removed.
+**The location is remembered per repository.** `pep skills update` refreshes each repository where
+it already lives, and never moves anything.
+
+On `update`, `-p` and `--dir` **narrow the run** rather than relocate — the same meaning they have
+in `npx skills`:
+
+```powershell
+pep skills update          # every repository, each where it lives
+pep skills update -p       # only the ones installed in this project
+```
+
+If the current project has none, `update -p` says so and does nothing. **To move a repository, add
+it again with the new flag** — `add` is where the location is decided, and the copy in the old
+location is then removed:
+
+```powershell
+pep skills add group/sub/project -p    # move it into this project
+```
+
+`pep skills list` prints each repository with the directory it lives in, which is what `-p` matches
+against.
 
 `pep auth token` writes only the access token to stdout, so agents can use it without parsing status
 text. Refresh occurs automatically shortly before expiry and the rotated refresh token replaces the old
